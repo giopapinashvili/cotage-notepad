@@ -86,6 +86,8 @@ const state = {
   connectionAttempt: 0
 };
 let deferredInstall,
+  installPromptAttempted = false,
+  installGuidanceShown = false,
   toastTimer,
   registration,
   confirmResolve,
@@ -1007,10 +1009,37 @@ async function history() {
 }
 async function install() {
   if (deferredInstall) {
-    deferredInstall.prompt();
-    await deferredInstall.userChoice;
+    const prompt = deferredInstall;
     deferredInstall = null;
-  } else $("install-dialog").showModal();
+    installPromptAttempted = true;
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
+    if (choice.outcome === "accepted") installVisibility();
+  } else showInstallGuidance();
+}
+function showInstallGuidance() {
+  if (!$("install-dialog").open) $("install-dialog").showModal();
+}
+function maybePromptInstall() {
+  if (!state.user || installPromptAttempted) return;
+  const installed =
+    matchMedia("(display-mode: standalone)").matches ||
+    navigator.standalone === true;
+  if (installed) return;
+  if (deferredInstall) {
+    install().catch((error) => {
+      console.error("Unable to show install prompt", error);
+      showInstallGuidance();
+    });
+    return;
+  }
+  const isIOS =
+    /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (isIOS && !installGuidanceShown) {
+    installGuidanceShown = true;
+    showInstallGuidance();
+  }
 }
 function installVisibility() {
   const installed =
@@ -1022,6 +1051,7 @@ function installVisibility() {
 }
 
 $("loading-retry").addEventListener("click", boot);
+document.addEventListener("click", maybePromptInstall);
 $("access-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const input = $("access-code");
@@ -1143,6 +1173,7 @@ window.addEventListener("beforeinstallprompt", (event) => {
 });
 window.addEventListener("appinstalled", () => {
   deferredInstall = null;
+  installPromptAttempted = true;
   installVisibility();
 });
 window.addEventListener("offline", () => {
