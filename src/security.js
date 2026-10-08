@@ -23,31 +23,18 @@ export async function digest(value) {
     (b) => b.toString(16).padStart(2, "0")
   ).join("");
 }
-export function strongPassword(password) {
-  if (
-    typeof password !== "string" ||
-    password.length < 12 ||
-    password.length > 128
-  )
-    throw new AppError("პაროლი 12–128 სიმბოლოს უნდა შეიცავდეს.");
+export function validPin(pin) {
+  if (typeof pin !== "string" || !/^\d{4}$/.test(pin))
+    throw new AppError("კოდი ზუსტად 4 ციფრი უნდა იყოს.");
 }
-export async function passwordHash(password, salt, pepper) {
-  const hmacKey = await crypto.subtle.importKey(
+export async function pinHash(pin, salt) {
+  const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(pepper),
-    { name: "HMAC", hash: "SHA-256" },
+    encoder.encode(pin),
+    "PBKDF2",
     false,
-    ["sign"]
+    ["deriveBits"]
   );
-  const material = await crypto.subtle.sign(
-    "HMAC",
-    hmacKey,
-    encoder.encode(password)
-  );
-  const key = await crypto.subtle.importKey("raw", material, "PBKDF2", false, [
-    "deriveBits"
-  ]);
-  // 100k is chosen for production Workers compatibility. The secret pepper is required.
   const bits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",

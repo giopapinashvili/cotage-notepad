@@ -11,8 +11,8 @@ import {
   randomToken,
   equal,
   digest,
-  strongPassword,
-  passwordHash,
+  validPin,
+  pinHash,
   checkOrigin,
   readJSON,
   getSessionToken,
@@ -88,18 +88,6 @@ export class FamilyNotebook extends DurableObject {
       "SELECT id, name, role FROM users ORDER BY CASE id WHEN 'deda' THEN 0 WHEN 'veko' THEN 1 WHEN 'lika' THEN 2 ELSE 3 END"
     );
   }
-  requireSecrets() {
-    if (
-      !this.env.APP_SECRET ||
-      this.env.APP_SECRET.length < 32 ||
-      this.env.APP_SECRET.startsWith("replace-")
-    )
-      throw new AppError(
-        "სერვერზე APP_SECRET ჯერ დასაყენებელია.",
-        "SETUP_REQUIRED",
-        503
-      );
-  }
   sessionById(id) {
     return this.one(
       "SELECT sessions.id AS session_id, users.id, users.name, users.role FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.id = ? AND expires_at > ?",
@@ -154,7 +142,6 @@ export class FamilyNotebook extends DurableObject {
           users: this.users(),
           appName: this.env.APP_NAME || "აგარაკის ჯავშნები"
         });
-      this.requireSecrets();
       if (!["GET", "HEAD"].includes(request.method)) checkOrigin(request);
       if (request.method === "POST" && path === "/api/setup")
         return await this.setup(request);
@@ -240,9 +227,8 @@ export class FamilyNotebook extends DurableObject {
         409
       );
     if (
-      !this.env.SETUP_TOKEN ||
-      this.env.SETUP_TOKEN.length < 24 ||
-      this.env.SETUP_TOKEN.startsWith("replace-")
+      typeof this.env.SETUP_TOKEN !== "string" ||
+      this.env.SETUP_TOKEN.length < 24
     )
       throw new AppError(
         "სერვერზე SETUP_TOKEN ჯერ დასაყენებელია.",
@@ -257,15 +243,15 @@ export class FamilyNotebook extends DurableObject {
     const body = await readJSON(request);
     if (!equal(body.token, this.env.SETUP_TOKEN))
       throw new AppError("გამართვის კოდი არასწორია.", "FORBIDDEN", 403);
+    validPin(body.pin);
+    const pin = body.pin;
     const rows = [];
     for (const member of MEMBERS) {
-      const password = body.passwords?.[member.id];
-      strongPassword(password);
       const salt = randomToken(24);
       rows.push({
         ...member,
         salt,
-        hash: await passwordHash(password, salt, this.env.APP_SECRET)
+        hash: await pinHash(pin, salt)
       });
     }
     this.ctx.storage.transactionSync(() => {
@@ -287,33 +273,31 @@ export class FamilyNotebook extends DurableObject {
     this.cleanExpired();
     this.throttle(
       `login:${request.headers.get("CF-Connecting-IP") || "local"}`,
-      12,
+      5,
       900000
     );
     const body = await readJSON(request);
     if (
       typeof body.user !== "string" ||
-      typeof body.password !== "string" ||
-      body.password.length > 128
+      typeof body.pin !== "string" ||
+      !/^\d{4}$/.test(body.pin)
     )
-      throw new AppError("სახელი ან პაროლი არასწორია.", "LOGIN_FAILED", 401);
+      throw new AppError("სახელი ან კოდი არასწორია.", "LOGIN_FAILED", 401);
     const row = this.one("SELECT * FROM users WHERE id = ?", body.user);
-    const hash = await passwordHash(
-      body.password,
-      row?.salt || "unknown-user-constant-salt",
-      this.env.APP_SECRET
+    const hash = await pinHash(
+      body.pin,
+      row?.salt || "unknown-user-constant-salt"
     );
     if (!row || !equal(hash, row.password_hash))
-      throw new AppError("სახელი ან პაროლი არასწორია.", "LOGIN_FAILED", 401);
+      throw new AppError("სახელი ან კოდი არასწორია.", "LOGIN_FAILED", 401);
     const token = randomToken(32),
       sid = await digest(token);
-    // Re-check after hashing: a concurrent password reset must not admit the old password.
     const fresh = this.one(
       "SELECT password_hash FROM users WHERE id = ?",
       row.id
     );
     if (!fresh || fresh.password_hash !== row.password_hash)
-      throw new AppError("პაროლი შეიცვალა. ხელახლა შედი.", "LOGIN_FAILED", 401);
+      throw new AppError("კოდი შეიცვალა. ხელახლა შედი.", "LOGIN_FAILED", 401);
     this.sql.exec(
       "INSERT INTO sessions(id,user_id,expires_at) VALUES(?,?,?)",
       sid,
@@ -325,73 +309,57 @@ export class FamilyNotebook extends DurableObject {
     });
   }
   async changePassword(request, user) {
-    this.throttle(`password:${user.id}`, 8, 900000);
+    if (user.role !== "admin")
+      throw new AppError("საერთო კოდის შეცვლა მხოლოდ გიორგის შეუძლია.", "FORBIDDEN", 403);
+    this.throttle(`pin:${user.id}`, 5, 900000);
     const body = await readJSON(request);
-    strongPassword(body.password);
-    const target = body.user || user.id;
-    if (target !== user.id && user.role !== "admin")
-      throw new AppError("სხვის პაროლს ვერ შეცვლი.", "FORBIDDEN", 403);
+    validPin(body.pin);
+    validPin(body.currentPin);
     const current = this.one("SELECT * FROM users WHERE id = ?", user.id);
     if (
-      typeof body.current !== "string" ||
-      body.current.length > 128 ||
-      !equal(
-        await passwordHash(body.current, current.salt, this.env.APP_SECRET),
-        current.password_hash
-      )
+      !equal(await pinHash(body.currentPin, current.salt), current.password_hash)
     )
-      throw new AppError("მიმდინარე პაროლი არასწორია.", "LOGIN_FAILED", 401);
-    const targetBefore = this.one(
-      "SELECT password_hash FROM users WHERE id = ?",
-      target
-    );
-    if (!targetBefore) throw new AppError("მომხმარებელი ვერ მოიძებნა.");
-    const salt = randomToken(24),
-      hash = await passwordHash(body.password, salt, this.env.APP_SECRET);
-    const newToken = target === user.id ? randomToken(32) : null;
-    const newSid = newToken ? await digest(newToken) : null;
+      throw new AppError("მიმდინარე კოდი არასწორია.", "LOGIN_FAILED", 401);
+    const rows = [];
+    for (const member of MEMBERS) {
+      const salt = randomToken(24);
+      rows.push({
+        id: member.id,
+        salt,
+        hash: await pinHash(body.pin, salt)
+      });
+    }
     this.ctx.storage.transactionSync(() => {
       if (!this.sessionById(user.session_id))
         throw new AppError("სესია დასრულდა.", "UNAUTHENTICATED", 401);
       if (
         this.one("SELECT password_hash FROM users WHERE id=?", user.id)
           ?.password_hash !== current.password_hash ||
-        this.one("SELECT password_hash FROM users WHERE id=?", target)
-          ?.password_hash !== targetBefore.password_hash
+        this.users().length !== MEMBERS.length
       )
         throw new AppError(
-          "პაროლი პარალელურად შეიცვალა. ხელახლა სცადე.",
+          "კოდი პარალელურად შეიცვალა. ხელახლა სცადე.",
           "CONFLICT",
           409
         );
-      this.sql.exec(
-        "UPDATE users SET salt=?, password_hash=? WHERE id=?",
-        salt,
-        hash,
-        target
-      );
-      this.sql.exec("DELETE FROM sessions WHERE user_id=?", target);
-      if (newSid)
+      for (const row of rows)
         this.sql.exec(
-          "INSERT INTO sessions(id,user_id,expires_at) VALUES(?,?,?)",
-          newSid,
-          target,
-          Date.now() + SESSION_MS
+          "UPDATE users SET salt=?, password_hash=? WHERE id=?",
+          row.salt,
+          row.hash,
+          row.id
         );
+      this.sql.exec("DELETE FROM sessions");
     });
     for (const ws of this.ctx.getWebSockets()) {
       const a = ws.deserializeAttachment();
-      if (a.user.id === target) {
-        this.releaseConnection(a.connectionId);
-        ws.close(4001, "Session revoked");
-      }
+      this.releaseConnection(a.connectionId);
+      ws.close(4001, "Shared PIN changed");
     }
     this.broadcastPresence();
-    return json(
-      { ok: true },
-      200,
-      newToken ? { "Set-Cookie": sessionCookie(request, newToken) } : {}
-    );
+    return json({ ok: true }, 200, {
+      "Set-Cookie": sessionCookie(request, "", 0)
+    });
   }
   bookings() {
     return this.all(

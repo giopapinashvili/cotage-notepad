@@ -1,4 +1,3 @@
-# Run npm run secrets to generate real local-only values.
-# Never place these values in public/ or commit them to Git.
-APP_SECRET=replace-with-at-least-32-random-characters
+# Run npm run secrets to generate a real local-only value.
+# Never place this value in public/ or commit it to Git.
 SETUP_TOKEN=replace-with-a-different-random-token

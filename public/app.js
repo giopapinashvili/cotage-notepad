@@ -1000,7 +1000,7 @@ function expireSession() {
   $("booking-list").innerHTML = "";
   $("history-list").innerHTML = "";
   $("password-form").reset();
-  $("login-password").value = "";
+  $("login-pin").value = "";
   screen("login");
   errorAt("login-error", "სესია დასრულდა. ხელახლა შედი.");
 }
@@ -1028,12 +1028,12 @@ $("login-form").addEventListener("submit", async (event) => {
   try {
     const result = await api("login", {
       user: $("login-user").value,
-      password: $("login-password").value
+      pin: $("login-pin").value
     });
     try {
       localStorage.setItem("cottage-member", $("login-user").value);
     } catch {}
-    $("login-password").value = "";
+    $("login-pin").value = "";
     enterApp(result.user);
   } catch (error) {
     errorAt("login-error", error.message);
@@ -1050,15 +1050,10 @@ $("setup-form").addEventListener("submit", async (event) => {
   try {
     await api("setup", {
       token: form.elements.token.value,
-      passwords: Object.fromEntries(
-        ["giorgi", "deda", "veko", "lika"].map((id) => [
-          id,
-          form.elements.namedItem(id).value
-        ])
-      )
+      pin: form.elements.pin.value
     });
     form.reset();
-    toast("ოჯახის ანგარიშები მზადაა. შედი შენი პაროლით.");
+    toast("ოჯახის საერთო კოდი მზადაა. შედი 4-ციფრიანი კოდით.");
     await boot();
   } catch (error) {
     errorAt("setup-error", error.message);
@@ -1132,13 +1127,7 @@ $("history-list").addEventListener("click", async (event) => {
 });
 $("account-button").addEventListener("click", () => {
   $("account-name").textContent = state.user.name;
-  $("password-target").innerHTML = (
-    state.user.role === "admin" ? state.users : [state.user]
-  )
-    .map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`)
-    .join("");
-  $("password-target").value = state.user.id;
-  $("password-target-label").hidden = state.user.role !== "admin";
+  $("password-form").hidden = state.user.role !== "admin";
   $("backup-actions").hidden = state.user.role !== "admin";
   errorAt("password-error", "");
   $("account-dialog").showModal();
@@ -1146,27 +1135,21 @@ $("account-button").addEventListener("click", () => {
 $("password-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
-  if (form.elements.password.value !== form.elements.confirm.value) {
-    errorAt("password-error", "ახალი პაროლები ერთმანეთს არ ემთხვევა.");
+  if (form.elements.pin.value !== form.elements.confirm.value) {
+    errorAt("password-error", "ახალი კოდები ერთმანეთს არ ემთხვევა.");
     return;
   }
   const button = event.submitter;
   button.disabled = true;
   state.passwordUpdating = true;
   try {
-    const self = form.elements.user.value === state.user.id;
     await api("password", {
-      user: form.elements.user.value,
-      current: form.elements.current.value,
-      password: form.elements.password.value
+      currentPin: form.elements.currentPin.value,
+      pin: form.elements.pin.value
     });
     form.reset();
-    if (self) {
-      location.reload();
-      return;
-    }
-    toast("პაროლი შეიცვალა.");
-    $("account-dialog").close();
+    expireSession();
+    errorAt("login-error", "საერთო კოდი შეიცვალა. შედი ახალი კოდით.");
   } catch (error) {
     errorAt("password-error", error.message);
   } finally {
@@ -1192,7 +1175,7 @@ $("export-button").addEventListener("click", async () => {
 $("logout-button").addEventListener("click", async () => {
   if (
     !(await confirmAction(
-      "გამოხვალ რვეულიდან? ხელახლა შესასვლელად პაროლი დაგჭირდება."
+      "გამოხვალ რვეულიდან? ხელახლა შესასვლელად საერთო კოდი დაგჭირდება."
     ))
   )
     return;

@@ -10,7 +10,13 @@ import {
   timeStamp,
   overlaps
 } from "../src/domain.js";
-import { checkOrigin, sessionCookie, readJSON } from "../src/security.js";
+import {
+  checkOrigin,
+  sessionCookie,
+  readJSON,
+  validPin,
+  pinHash
+} from "../src/security.js";
 
 function booking(extra = {}) {
   return {
@@ -88,6 +94,14 @@ test("Production sessions are secure cookies and cross-site requests are rejecte
       new Request(req.url, { headers: { Origin: "https://foreign.example" } })
     )
   );
+});
+test("Shared access codes are four digits and are stored as salted hashes", async () => {
+  assert.doesNotThrow(() => validPin("1234"));
+  for (const pin of ["123", "12345", "12a4", "", 1234])
+    assert.throws(() => validPin(pin));
+  const first = await pinHash("1234", "first-salt");
+  assert.equal(await pinHash("1234", "first-salt"), first);
+  assert.notEqual(await pinHash("1234", "second-salt"), first);
 });
 test("JSON endpoints reject scalars, arrays and oversized bodies", async () => {
   for (const body of ["null", "[]", '"password"']) {

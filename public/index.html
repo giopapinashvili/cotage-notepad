@@ -43,13 +43,16 @@
             ></select
           ></label>
           <label
-            >პაროლი<input
-              id="login-password"
-              name="password"
+            >საერთო კოდი<input
+              id="login-pin"
+              name="pin"
               type="password"
-              autocomplete="current-password"
+              inputmode="numeric"
+              pattern="[0-9]{4}"
+              autocomplete="one-time-code"
               required
-              maxlength="128"
+              minlength="4"
+              maxlength="4"
           /></label>
           <p id="login-error" class="error" role="alert" hidden></p>
           <button class="button primary full" type="submit">შესვლა</button>
@@ -62,7 +65,7 @@
       <section id="setup-screen" class="welcome" hidden>
         <img class="brand-icon" src="/icons/icon-192.png" alt="" />
         <h1>პირველი გამართვა</h1>
-        <p class="muted">ერთხელ მიუთითე ოთხივე წევრის პაროლი.</p>
+        <p class="muted">ერთხელ დააყენე ოჯახის საერთო 4-ციფრიანი კოდი.</p>
         <form id="setup-form" class="auth-form">
           <label
             >გამართვის კოდი<input
@@ -72,42 +75,20 @@
               required
           /></label>
           <label
-            >გიორგის პაროლი<input
-              name="giorgi"
+            >საერთო კოდი<input
+              name="pin"
               type="password"
+              inputmode="numeric"
+              pattern="[0-9]{4}"
               autocomplete="new-password"
-              minlength="12"
-              maxlength="128"
+              minlength="4"
+              maxlength="4"
+              value="1234"
               required
           /></label>
-          <label
-            >დედას პაროლი<input
-              name="deda"
-              type="password"
-              autocomplete="new-password"
-              minlength="12"
-              maxlength="128"
-              required
-          /></label>
-          <label
-            >ვეკოს პაროლი<input
-              name="veko"
-              type="password"
-              autocomplete="new-password"
-              minlength="12"
-              maxlength="128"
-              required
-          /></label>
-          <label
-            >ლიკას პაროლი<input
-              name="lika"
-              type="password"
-              autocomplete="new-password"
-              minlength="12"
-              maxlength="128"
-              required
-          /></label>
-          <p class="footnote">თითოეული პაროლი: მინიმუმ 12 სიმბოლო.</p>
+          <p class="footnote">
+            საწყისი კოდია 1234. ოჯახის ყველა წევრი ერთსა და იმავე კოდს გამოიყენებს.
+          </p>
           <p id="setup-error" class="error" role="alert" hidden></p>
           <button type="submit" class="button primary full">
             რვეულის გახსნა
@@ -358,38 +339,41 @@
       </div>
       <p id="account-name"></p>
       <form id="password-form">
-        <label id="password-target-label"
-          >ვისი პაროლი?<select id="password-target" name="user"></select></label
-        ><label
-          >შენი მიმდინარე პაროლი<input
-            name="current"
+        <label
+          >მიმდინარე საერთო კოდი<input
+            name="currentPin"
             type="password"
-            autocomplete="current-password"
+            inputmode="numeric"
+            pattern="[0-9]{4}"
             required
-            maxlength="128" /></label
+            minlength="4"
+            maxlength="4" /></label
         ><label
-          >ახალი პაროლი<input
-            name="password"
+          >ახალი საერთო კოდი<input
+            name="pin"
             type="password"
+            inputmode="numeric"
+            pattern="[0-9]{4}"
             autocomplete="new-password"
             required
-            minlength="12"
-            maxlength="128" /></label
+            minlength="4"
+            maxlength="4" /></label
         ><label
-          >გაიმეორე ახალი პაროლი<input
+          >გაიმეორე ახალი კოდი<input
             name="confirm"
             type="password"
+            inputmode="numeric"
+            pattern="[0-9]{4}"
             autocomplete="new-password"
             required
-            minlength="12"
-            maxlength="128"
+            minlength="4"
+            maxlength="4"
         /></label>
         <p class="footnote">
-          მინიმუმ 12 სიმბოლო. სხვა მოწყობილობებზე ამ მომხმარებლის სესიები
-          დასრულდება.
+          კოდი ყველასთვის შეიცვლება. ოჯახის წევრებს ხელახლა შესვლა მოუწევთ.
         </p>
         <p id="password-error" class="error" role="alert" hidden></p>
-        <button class="button primary" type="submit">პაროლის შეცვლა</button>
+        <button class="button primary" type="submit">საერთო კოდის შეცვლა</button>
       </form>
       <div id="backup-actions" class="form-section" hidden>
         <h3>ჯავშნების ასლი</h3>

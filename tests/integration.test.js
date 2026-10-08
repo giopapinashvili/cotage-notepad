@@ -73,14 +73,8 @@ test(
   { timeout: 120000 },
   async (t) => {
     const folder = await mkdtemp(join(tmpdir(), "cottage-integration-"));
-    const appSecret = randomBytes(48).toString("hex"),
-      setupToken = randomBytes(32).toString("hex");
-    const passwords = Object.fromEntries(
-      ["giorgi", "deda", "veko", "lika"].map((id) => [
-        id,
-        randomBytes(24).toString("hex")
-      ])
-    );
+    const setupToken = randomBytes(32).toString("hex"),
+      initialPin = "1234";
     await cp(join(root, "src"), join(folder, "src"), { recursive: true });
     await cp(join(root, "public"), join(folder, "public"), { recursive: true });
     await writeFile(
@@ -89,7 +83,7 @@ test(
     );
     await writeFile(
       join(folder, ".dev.vars"),
-      `APP_SECRET=${appSecret}\nSETUP_TOKEN=${setupToken}\n`,
+      `SETUP_TOKEN=${setupToken}\n`,
       { mode: 0o600 }
     );
     const config = JSON.parse(
@@ -147,8 +141,8 @@ test(
       }
       return { response, data };
     }
-    async function login(user, password = passwords[user]) {
-      const { response } = await http("login", { body: { user, password } });
+    async function login(user, pin = initialPin) {
+      const { response } = await http("login", { body: { user, pin } });
       assert.equal(response.status, 200);
       return response.headers.get("set-cookie").split(";")[0];
     }
@@ -188,17 +182,23 @@ test(
             403
           );
           assert.equal(
-            (await http("setup", { body: { token: "incorrect", passwords } }))
+            (await http("setup", {
+              body: { token: "incorrect", pin: initialPin }
+            }))
               .response.status,
             403
           );
           assert.equal(
-            (await http("setup", { body: { token: setupToken, passwords } }))
+            (await http("setup", {
+              body: { token: setupToken, pin: initialPin }
+            }))
               .response.status,
             201
           );
           assert.equal(
-            (await http("setup", { body: { token: setupToken, passwords } }))
+            (await http("setup", {
+              body: { token: setupToken, pin: initialPin }
+            }))
               .response.status,
             409
           );
@@ -396,37 +396,37 @@ test(
         }
       );
       await t.test(
-        "Password reset revokes existing sessions and sockets; only admin can reset another member",
+        "Only admin can change the shared PIN; changing it ends all sessions",
         async () => {
-          const newPassword = randomBytes(24).toString("hex");
+          const newPin = "5678";
           assert.equal(
             (
               await http("password", {
                 cookie: dedaCookie,
                 body: {
-                  user: "lika",
-                  current: passwords.deda,
-                  password: newPassword
+                  currentPin: initialPin,
+                  pin: newPin
                 }
               })
             ).response.status,
             403
           );
-          const closed = once(deda.ws, "close");
+          const closedDeda = once(deda.ws, "close");
+          const closedGiorgi = once(giorgi.ws, "close");
           assert.equal(
             (
               await http("password", {
                 cookie: giorgiCookie,
                 body: {
-                  user: "deda",
-                  current: passwords.giorgi,
-                  password: newPassword
+                  currentPin: initialPin,
+                  pin: newPin
                 }
               })
             ).response.status,
             200
           );
-          assert.equal((await closed)[0], 4001);
+          assert.equal((await closedDeda)[0], 4001);
+          assert.equal((await closedGiorgi)[0], 4001);
           assert.equal(
             (await http("me", { cookie: dedaCookie })).response.status,
             401
@@ -434,50 +434,15 @@ test(
           assert.equal(
             (
               await http("login", {
-                body: { user: "deda", password: passwords.deda }
+                body: { user: "deda", pin: initialPin }
               })
             ).response.status,
             401
           );
-          const nextCookie = await login("deda", newPassword);
+          const nextCookie = await login("deda", newPin);
           assert.equal(
             (await http("me", { cookie: nextCookie })).response.status,
             200
-          );
-        }
-      );
-      await t.test(
-        "Changing your own password rotates the current cookie and ends all older sessions",
-        async () => {
-          const changed = await http("password", {
-            cookie: giorgiCookie,
-            body: {
-              user: "giorgi",
-              current: passwords.giorgi,
-              password: randomBytes(24).toString("hex")
-            }
-          });
-          assert.equal(changed.response.status, 200);
-          const nextCookie = changed.response.headers
-            .get("set-cookie")
-            .split(";")[0];
-          assert.notEqual(nextCookie, giorgiCookie);
-          assert.equal(
-            (await http("me", { cookie: giorgiCookie })).response.status,
-            401
-          );
-          assert.equal(
-            (await http("me", { cookie: nextCookie })).response.status,
-            200
-          );
-          assert.equal(
-            (await http("logout", { cookie: nextCookie, body: {} })).response
-              .status,
-            200
-          );
-          assert.equal(
-            (await http("me", { cookie: nextCookie })).response.status,
-            401
           );
         }
       );
