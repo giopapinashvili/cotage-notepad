@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="ka">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#293A2C" />
+    <meta
+      name="description"
+      content="ოჯახის საერთო რვეული აგარაკის ჯავშნებისთვის"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="აგარაკი" />
+    <title>აგარაკის ჯავშნები</title>
+    <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section id="loading-screen" class="welcome" aria-live="polite">
+        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
+        <h1>აგარაკის ჯავშნები</h1>
+        <p id="loading-message">რვეული იხსნება…</p>
+        <button id="loading-retry" class="button" hidden>ხელახლა ცდა</button>
+      </section>
+      <section id="login-screen" class="welcome" hidden>
+        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
+        <h1 data-app-name>აგარაკის ჯავშნები</h1>
+        <p class="muted">ჩვენი საერთო რვეული</p>
+        <form id="login-form" class="auth-form">
+          <label
+            >ვინ ხარ?<select
+              id="login-user"
+              name="username"
+              autocomplete="username"
+              required
+            ></select
+          ></label>
+          <label
+            >პაროლი<input
+              id="login-password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+              maxlength="128"
+          /></label>
+          <p id="login-error" class="error" role="alert" hidden></p>
+          <button class="button primary full" type="submit">შესვლა</button>
+        </form>
+        <p class="footnote">მხოლოდ ჩვენი ოჯახისთვის</p>
+        <button class="text-button install-action" type="button">
+          ტელეფონზე დაყენება
+        </button>
+      </section>
+      <section id="setup-screen" class="welcome" hidden>
+        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
+        <h1>პირველი გამართვა</h1>
+        <p class="muted">ერთხელ მიუთითე ოთხივე წევრის პაროლი.</p>
+        <form id="setup-form" class="auth-form">
+          <label
+            >გამართვის კოდი<input
+              name="token"
+              type="password"
+              autocomplete="off"
+              required
+          /></label>
+          <label
+            >გიორგის პაროლი<input
+              name="giorgi"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              maxlength="128"
+              required
+          /></label>
+          <label
+            >დედას პაროლი<input
+              name="deda"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              maxlength="128"
+              required
+          /></label>
+          <label
+            >ვეკოს პაროლი<input
+              name="veko"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              maxlength="128"
+              required
+          /></label>
+          <label
+            >ლიკას პაროლი<input
+              name="lika"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              maxlength="128"
+              required
+          /></label>
+          <p class="footnote">თითოეული პაროლი: მინიმუმ 12 სიმბოლო.</p>
+          <p id="setup-error" class="error" role="alert" hidden></p>
+          <button type="submit" class="button primary full">
+            რვეულის გახსნა
+          </button>
+        </form>
+      </section>
+      <section id="app-screen" hidden>
+        <header class="app-header">
+          <div class="brand-row">
+            <img src="/icons/icon-192.png" class="header-icon" alt="" />
+            <div>
+              <h1 data-app-name>აგარაკის ჯავშნები</h1>
+              <p>ჩვენი საერთო რვეული</p>
+            </div>
+            <button
+              id="account-button"
+              class="avatar-button"
+              type="button"
+              aria-label="ჩემი ანგარიში"
+            ></button>
+          </div>
+          <div class="family-row">
+            <div id="members" class="members" aria-label="ოჯახის წევრები"></div>
+            <div id="connection-status" class="connection" role="status">
+              დაკავშირება…
+            </div>
+          </div>
+          <div class="month-row">
+            <button
+              id="previous-month"
+              class="icon-button"
+              aria-label="წინა თვე"
+              type="button"
+            >
+              ‹
+            </button>
+            <h2 id="month-label"></h2>
+            <button
+              id="next-month"
+              class="icon-button"
+              aria-label="შემდეგი თვე"
+              type="button"
+            >
+              ›
+            </button>
+          </div>
+          <nav class="toolbar" aria-label="რვეულის მოქმედებები">
+            <button id="today-button" class="button small" type="button">
+              დღეს</button
+            ><button id="history-button" class="button small" type="button">
+              ისტორია</button
+            ><button class="button small install-action" type="button">
+              დაყენება
+            </button>
+          </nav>
+        </header>
+        <p id="offline-banner" class="notice" hidden>
+          კავშირი გაწყდა. ხელახლა დაკავშირებამდე ცვლილება ვერ გაზიარდება.
+        </p>
+        <div id="update-banner" class="notice" hidden>
+          ახალი ვერსია მზადაა.
+          <button id="update-button" class="text-button" type="button">
+            განახლება
+          </button>
+        </div>
+        <section id="booking-list" aria-label="თარიღები და ჯავშნები"></section>
+        <footer class="app-footer">
+          <span id="signed-in-label"></span
+          ><button id="logout-button" class="text-button" type="button">
+            გამოსვლა
+          </button>
+        </footer>
+        <div class="bottom-action">
+          <button
+            id="add-booking-button"
+            type="button"
+            class="button primary full"
+          >
+            <span aria-hidden="true">+</span> ჯავშნის დამატება
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="editor-dialog" class="sheet" aria-labelledby="editor-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">საერთო ჩანაწერი</p>
+          <h2 id="editor-title">ჯავშნის რედაქტირება</h2>
+        </div>
+        <button
+          id="editor-close"
+          class="icon-button"
+          aria-label="დახურვა"
+          type="button"
+        >
+          ×
+        </button>
+      </div>
+      <p id="editor-sync" class="editor-sync" role="status">
+        ცვლილებები სხვებს წერისას უჩანთ.
+      </p>
+      <div id="recovery-panel" class="notice" hidden>
+        <label
+          >გაუზიარებელი ცვლილებები<textarea
+            id="recovery-text"
+            rows="4"
+            readonly
+          ></textarea>
+        </label>
+        <p class="footnote">
+          შეადარე ქვემოთ არსებულ ჩანაწერს და საჭირო ტექსტი გადაიტანე.
+        </p>
+      </div>
+      <form id="editor-form">
+        <fieldset id="editor-fields">
+          <div class="form-grid">
+            <label
+              >შესვლა<input
+                name="start_date"
+                type="date"
+                required
+                min="2000-01-01"
+                max="2099-12-31" /></label
+            ><label
+              >გასვლა<input
+                name="end_date"
+                type="date"
+                required
+                min="2000-01-01"
+                max="2099-12-31" /></label
+            ><label
+              >შესვლის საათი<input
+                name="start_time"
+                type="time"
+                required /></label
+            ><label
+              >გასვლის საათი<input name="end_time" type="time" required
+            /></label>
+          </div>
+          <label
+            >სტატუსი<select name="status">
+              <option value="confirmed">დაჯავშნილია</option>
+              <option value="hold">დადასტურებას ველოდებით</option>
+              <option value="blocked">ჩვენთვის დაკავებულია</option>
+            </select></label
+          >
+          <div class="form-section">
+            <h3>ადამიანების რაოდენობა</h3>
+            <label
+              >სტუმრები<input
+                name="guests"
+                type="number"
+                inputmode="numeric"
+                min="1"
+                max="100"
+                step="1"
+            /></label>
+          </div>
+          <div class="form-section">
+            <h3>ფასი</h3>
+            <div class="form-grid">
+              <label
+                >სრული თანხა · ₾<input
+                  name="price"
+                  type="number"
+                  inputmode="decimal"
+                  min="0"
+                  max="1000000"
+                  step="0.01" /></label
+              ><label
+                >ავანსი · ₾<input
+                  name="deposit"
+                  type="number"
+                  inputmode="decimal"
+                  min="0"
+                  max="1000000"
+                  step="0.01"
+              /></label>
+            </div>
+            <p id="editor-balance" class="balance-line"></p>
+          </div>
+          <div class="form-section">
+            <h3>დამატებითი ინფორმაცია</h3>
+            <label
+              >სტუმრის სახელი<input
+                name="guest_name"
+                maxlength="100"
+                autocomplete="off" /></label
+            ><label
+              >ტელეფონი<input
+                name="phone"
+                type="tel"
+                maxlength="40"
+                autocomplete="off" /></label
+            ><label
+              >ჩანაწერი<textarea
+                name="notes"
+                rows="4"
+                maxlength="10000"
+                placeholder="სტუმრის სურვილები, შეთანხმებები…"
+              ></textarea>
+            </label>
+          </div>
+        </fieldset>
+        <p id="editor-error" class="error" role="alert" hidden></p>
+        <button id="editor-resume" class="button full" type="button" hidden>
+          რედაქტირების გაგრძელება
+        </button>
+        <div class="editor-actions">
+          <button id="save-booking" class="button primary" type="submit">
+            შენახვა</button
+          ><button id="discard-draft" class="button" type="button">
+            ცვლილებების გაუქმება
+          </button>
+        </div>
+        <button id="cancel-booking" class="text-button danger" type="button">
+          ჯავშნის გაუქმება
+        </button>
+      </form>
+    </dialog>
+
+    <dialog id="history-dialog" class="sheet" aria-labelledby="history-title">
+      <div class="dialog-heading">
+        <h2 id="history-title">ცვლილებების ისტორია</h2>
+        <button
+          class="icon-button"
+          data-close="history-dialog"
+          aria-label="დახურვა"
+          type="button"
+        >
+          ×
+        </button>
+      </div>
+      <div id="history-list"></div>
+    </dialog>
+    <dialog id="account-dialog" class="sheet" aria-labelledby="account-title">
+      <div class="dialog-heading">
+        <h2 id="account-title">ჩემი ანგარიში</h2>
+        <button
+          class="icon-button"
+          data-close="account-dialog"
+          aria-label="დახურვა"
+          type="button"
+        >
+          ×
+        </button>
+      </div>
+      <p id="account-name"></p>
+      <form id="password-form">
+        <label id="password-target-label"
+          >ვისი პაროლი?<select id="password-target" name="user"></select></label
+        ><label
+          >შენი მიმდინარე პაროლი<input
+            name="current"
+            type="password"
+            autocomplete="current-password"
+            required
+            maxlength="128" /></label
+        ><label
+          >ახალი პაროლი<input
+            name="password"
+            type="password"
+            autocomplete="new-password"
+            required
+            minlength="12"
+            maxlength="128" /></label
+        ><label
+          >გაიმეორე ახალი პაროლი<input
+            name="confirm"
+            type="password"
+            autocomplete="new-password"
+            required
+            minlength="12"
+            maxlength="128"
+        /></label>
+        <p class="footnote">
+          მინიმუმ 12 სიმბოლო. სხვა მოწყობილობებზე ამ მომხმარებლის სესიები
+          დასრულდება.
+        </p>
+        <p id="password-error" class="error" role="alert" hidden></p>
+        <button class="button primary" type="submit">პაროლის შეცვლა</button>
+      </form>
+      <div id="backup-actions" class="form-section" hidden>
+        <h3>ჯავშნების ასლი</h3>
+        <button id="export-button" class="button" type="button">
+          სარეზერვო ასლის ჩამოტვირთვა
+        </button>
+      </div>
+    </dialog>
+    <dialog id="install-dialog" class="sheet" aria-labelledby="install-title">
+      <div class="dialog-heading">
+        <h2 id="install-title">ტელეფონზე დაყენება</h2>
+        <button
+          class="icon-button"
+          data-close="install-dialog"
+          aria-label="დახურვა"
+          type="button"
+        >
+          ×
+        </button>
+      </div>
+      <img
+        class="install-icon"
+        src="/icons/icon-192.png"
+        alt="აგარაკის რვეულის ხატულა"
+      />
+      <h3>Android</h3>
+      <p>
+        გახსენი Chrome-ში. მენიუში ⋮ აირჩიე „Install app“ ან „Add to Home
+        screen“.
+      </p>
+      <h3>iPhone</h3>
+      <p>
+        გახსენი Safari-ში. დააჭირე გაზიარებას → „Add to Home Screen“ → „Add“. თუ
+        გამოჩნდა „Open as Web App“, ჩართე.
+      </p>
+      <p class="muted">
+        დაყენების შემდეგ რვეული საკუთარი ხატულიდან გაიხსნება. საერთო
+        ჩანაწერებისთვის ინტერნეტკავშირი საჭიროა.
+      </p>
+    </dialog>
+    <dialog
+      id="confirm-dialog"
+      class="confirm-dialog"
+      aria-labelledby="confirm-title"
+    >
+      <h2 id="confirm-title">დადასტურება</h2>
+      <p id="confirm-message"></p>
+      <div class="editor-actions">
+        <button id="confirm-yes" class="button primary" type="button">
+          დადასტურება</button
+        ><button id="confirm-no" class="button" type="button">უკან</button>
+      </div>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <noscript>რვეულის გამოსაყენებლად ბრაუზერში JavaScript ჩართე.</noscript>
+  </body>
+</html>
