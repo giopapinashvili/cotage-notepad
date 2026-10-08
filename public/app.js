@@ -56,6 +56,8 @@ const WEEKDAYS = [
   "შაბათი"
 ];
 const USER_STORAGE_KEY = "cottage-notebook-user";
+const ACCESS_STORAGE_KEY = "cottage-notebook-access-v1";
+const ACCESS_CODE = "20031003";
 const state = {
   user: null,
   users: [],
@@ -206,7 +208,7 @@ function rejectRequests(message) {
   state.requests.clear();
 }
 function screen(name) {
-  for (const id of ["loading", "choose-user", "app"])
+  for (const id of ["loading", "access", "choose-user", "app"])
     $(`${id}-screen`).hidden = id !== name;
 }
 async function api(path, body) {
@@ -232,6 +234,19 @@ async function api(path, body) {
   return data;
 }
 async function boot() {
+  try {
+    if (localStorage.getItem(ACCESS_STORAGE_KEY) !== "accepted") {
+      screen("access");
+      $("access-code").focus();
+      return;
+    }
+  } catch {
+    screen("access");
+    $("access-error").textContent =
+      "ბრაუზერის მეხსიერებაზე წვდომა ვერ მოხერხდა. ჩართე საიტის მონაცემების შენახვა და სცადე თავიდან.";
+    $("access-error").hidden = false;
+    return;
+  }
   screen("loading");
   $("loading-retry").hidden = true;
   $("loading-message").textContent = "რვეული იხსნება…";
@@ -1007,6 +1022,27 @@ function installVisibility() {
 }
 
 $("loading-retry").addEventListener("click", boot);
+$("access-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = $("access-code");
+  if (input.value !== ACCESS_CODE) {
+    $("access-error").textContent = "პაროლი არასწორია.";
+    $("access-error").hidden = false;
+    input.select();
+    return;
+  }
+  try {
+    localStorage.setItem(ACCESS_STORAGE_KEY, "accepted");
+  } catch {
+    $("access-error").textContent =
+      "პაროლი სწორია, მაგრამ ამ მოწყობილობაზე დამახსოვრება ვერ მოხერხდა. ჩართე საიტის მონაცემების შენახვა და სცადე თავიდან.";
+    $("access-error").hidden = false;
+    return;
+  }
+  input.value = "";
+  $("access-error").hidden = true;
+  boot();
+});
 $("account-options").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-user-id]");
   const user = state.users.find((candidate) => candidate.id === button?.dataset.userId);

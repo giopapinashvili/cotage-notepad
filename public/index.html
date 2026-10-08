@@ -29,6 +29,25 @@
         <p id="loading-message">რვეული იხსნება…</p>
         <button id="loading-retry" class="button" hidden>ხელახლა ცდა</button>
       </section>
+      <section id="access-screen" class="welcome" hidden>
+        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
+        <h1>აგარაკის ჯავშნები</h1>
+        <p>საიტის გასახსნელად შეიყვანე პაროლი</p>
+        <form id="access-form" class="access-form">
+          <label for="access-code">პაროლი</label>
+          <input
+            id="access-code"
+            name="access-code"
+            type="password"
+            inputmode="numeric"
+            autocomplete="current-password"
+            maxlength="8"
+            required
+          />
+          <p id="access-error" class="error" role="alert" hidden></p>
+          <button class="button primary full" type="submit">გახსნა</button>
+        </form>
+      </section>
       <section id="choose-user-screen" class="welcome" hidden>
         <img class="brand-icon" src="/icons/icon-192.png" alt="" />
         <h1 data-app-name>აგარაკის ჯავშნები</h1>
