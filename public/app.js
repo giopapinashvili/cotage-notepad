@@ -55,9 +55,9 @@ const WEEKDAYS = [
   "პარასკევი",
   "შაბათი"
 ];
-const FAMILY = { id: "family", name: "ოჯახი", role: "admin" };
+const USER_STORAGE_KEY = "cottage-notebook-user";
 const state = {
-  user: FAMILY,
+  user: null,
   users: [],
   bookings: new Map(),
   drafts: new Map(),
@@ -147,6 +147,7 @@ function money(value) {
   return `${new Intl.NumberFormat("ka-GE", { maximumFractionDigits: 2 }).format(Number(value))} ₾`;
 }
 function memberName(id) {
+  if (id === "family") return "ძველი ჩანაწერი";
   return state.users.find((u) => u.id === id)?.name || "ოჯახის წევრი";
 }
 function placeToast() {
@@ -205,7 +206,7 @@ function rejectRequests(message) {
   state.requests.clear();
 }
 function screen(name) {
-  for (const id of ["loading", "app"])
+  for (const id of ["loading", "choose-user", "app"])
     $(`${id}-screen`).hidden = id !== name;
 }
 async function api(path, body) {
@@ -241,13 +242,57 @@ async function boot() {
       .querySelectorAll("[data-app-name]")
       .forEach((el) => (el.textContent = meta.appName));
     document.title = meta.appName;
-    enterApp(FAMILY);
+    $("account-options").innerHTML = meta.users
+      .map(
+        (user) =>
+          `<button class="button account-choice" type="button" data-user-id="${esc(user.id)}"><span class="member-avatar" aria-hidden="true">${esc(user.name[0])}</span>${esc(user.name)}</button>`
+      )
+      .join("");
+    let rememberedId;
+    try {
+      rememberedId = localStorage.getItem(USER_STORAGE_KEY);
+    } catch {
+      $("choose-user-error").textContent =
+        "ამ მოწყობილობაზე სახელი ვერ შეინახება; შემდეგ გახსნაზე თავიდან მოგიწევს არჩევა.";
+      $("choose-user-error").hidden = false;
+    }
+    const rememberedUser = meta.users.find((user) => user.id === rememberedId);
+    if (rememberedUser) enterApp(rememberedUser);
+    else screen("choose-user");
   } catch (error) {
     $("loading-message").textContent = navigator.onLine
       ? error.message
       : "ინტერნეტკავშირი არ არის. საერთო რვეულის გასახსნელად დაუკავშირდი ინტერნეტს.";
     $("loading-retry").hidden = false;
   }
+}
+function selectAccount(user) {
+  state.users = state.users.map((candidate) =>
+    candidate.id === user.id ? user : candidate
+  );
+  try {
+    localStorage.setItem(USER_STORAGE_KEY, user.id);
+    $("choose-user-error").hidden = true;
+  } catch {
+    toast("ამ მოწყობილობაზე სახელი ვერ შეინახა; შემდეგ გახსნაზე თავიდან მოგიწევს არჩევა.");
+  }
+  enterApp(user);
+}
+async function switchAccount() {
+  if (state.editingId) {
+    await requestCloseEditor();
+    if (state.editingId) return;
+  }
+  const ws = state.ws;
+  state.user = null;
+  state.connectionAttempt++;
+  state.connecting = false;
+  state.connected = false;
+  state.ws = null;
+  clearTimeout(state.retryTimer);
+  rejectRequests("ანგარიში შეიცვალა.");
+  ws?.close();
+  screen("choose-user");
 }
 function enterApp(user) {
   state.user = user;
@@ -307,7 +352,7 @@ async function connect() {
       (location.protocol === "https:" ? "wss:" : "ws:") +
         "//" +
         location.host +
-        "/api/ws"
+        `/api/ws?user=${encodeURIComponent(userId)}`
     );
     state.ws = ws;
     lastPong = Date.now();
@@ -480,13 +525,10 @@ function receive(msg) {
   }
 }
 function renderMembers() {
-  $("members").innerHTML = state.users
-    .filter((u) => u.id === FAMILY.id)
-    .map(
-      (u) =>
-        `<span class="member${state.connected && state.presence.includes(u.id) ? " online" : ""}" data-member="${esc(u.id)}" aria-label="${esc(u.name)}${state.connected && state.presence.includes(u.id) ? " — დაკავშირებულია" : ""}"><span class="member-avatar" aria-hidden="true">${esc(u.name[0])}</span><span>${esc(u.name)}</span></span>`
-    )
-    .join("");
+  const user = state.user;
+  $("members").innerHTML = user
+    ? `<span class="member${state.connected && state.presence.includes(user.id) ? " online" : ""}" data-member="${esc(user.id)}"><span class="member-avatar" aria-hidden="true">${esc(user.name[0])}</span><span>${esc(user.name)}</span></span>`
+    : "";
 }
 function records() {
   const result = [];
@@ -588,7 +630,13 @@ function bookingCard(record, date) {
       : "—";
   const headerData =
     isDate(d.start_date) && isDate(d.end_date) ? d : record.committed || d;
-  return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-booking-id="${esc(id)}" data-date="${date}"><button type="button" class="entry-header" data-action="toggle" data-id="${esc(id)}" aria-expanded="${open}"><span><span class="entry-title">${esc(rangeLabel(headerData))}</span><span class="status status-${esc(status)}">${esc(statusText)}</span>${writer ? `<span class="writer">${esc(writer)}</span>` : ""}</span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body"><div class="stay-line"><span>შესვლა: ${esc(d.start_date)} · ${esc(d.start_time)}</span><span>გასვლა: ${esc(d.end_date)} · ${esc(d.end_time)}</span></div>${d.status !== "blocked" ? `<div class="detail-group"><div class="detail-label">ადამიანების რაოდენობა</div><div class="detail-value">${esc(d.guests || "—")} სტუმარი</div></div><div class="detail-group"><div class="detail-label">ფასი · სრული თანხა</div><div class="detail-value">${esc(money(d.price))}</div><div class="payments"><div><span class="payment-label">ავანსი</span><span class="payment-value">${esc(money(d.deposit))}</span></div><div><span class="payment-label">დარჩენილი</span><span class="payment-value">${esc(balance)}</span></div></div></div>` : ""}<div class="detail-group"><div class="detail-label">დამატებითი ინფორმაცია</div><p class="note-text">${esc(d.notes || "დამატებითი ინფორმაცია არ არის.")}</p>${d.guest_name ? `<p class="guest-line">სტუმარი: ${esc(d.guest_name)}</p>` : ""}${d.phone ? `<p class="guest-line">ტელეფონი: <a href="tel:${esc(d.phone.replace(/[^\d+]/g, ""))}">${esc(d.phone)}</a></p>` : ""}</div>${draft ? '<p class="preview-warning">წერისას გაზიარებული ცვლილებები. საბოლოოდ დასაფიქსირებლად საჭიროა შენახვა.</p>' : ""}<div class="entry-footer"><span class="last-edited">${record.updatedAt ? `${esc(memberName(record.updatedBy))} · ${esc(shortTime(record.updatedAt))}` : "ახალი ჯავშანი"}</span><button type="button" class="button small" data-action="edit" data-id="${esc(id)}" ${!state.connected || locked ? "disabled" : ""}>${locked ? "ახლა იწერება" : draft ? "გაგრძელება" : "რედაქტირება"}</button></div></div>` : ""}</article>`;
+  const createdBy =
+      record.createdBy ||
+      (record.draft?.baseVersion === 0
+        ? record.draft.ownerId
+        : record.updatedBy),
+    attribution = `<span class="booking-attribution"><span class="last-edited">შექმნა: ${esc(memberName(createdBy))}</span>${record.updatedAt ? `<span class="last-edited">ბოლო ცვლილება: ${esc(memberName(record.updatedBy))} · ${esc(shortTime(record.updatedAt))}</span>` : ""}</span>`;
+  return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-booking-id="${esc(id)}" data-date="${date}"><button type="button" class="entry-header" data-action="toggle" data-id="${esc(id)}" aria-expanded="${open}"><span><span class="entry-title">${esc(rangeLabel(headerData))}</span><span class="status status-${esc(status)}">${esc(statusText)}</span>${writer ? `<span class="writer">${esc(writer)}</span>` : ""}</span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body"><div class="stay-line"><span>შესვლა: ${esc(d.start_date)} · ${esc(d.start_time)}</span><span>გასვლა: ${esc(d.end_date)} · ${esc(d.end_time)}</span></div>${d.status !== "blocked" ? `<div class="detail-group"><div class="detail-label">ადამიანების რაოდენობა</div><div class="detail-value">${esc(d.guests || "—")} სტუმარი</div></div><div class="detail-group"><div class="detail-label">ფასი · სრული თანხა</div><div class="detail-value">${esc(money(d.price))}</div><div class="payments"><div><span class="payment-label">ავანსი</span><span class="payment-value">${esc(money(d.deposit))}</span></div><div><span class="payment-label">დარჩენილი</span><span class="payment-value">${esc(balance)}</span></div></div></div>` : ""}<div class="detail-group"><div class="detail-label">დამატებითი ინფორმაცია</div><p class="note-text">${esc(d.notes || "დამატებითი ინფორმაცია არ არის.")}</p>${d.guest_name ? `<p class="guest-line">სტუმარი: ${esc(d.guest_name)}</p>` : ""}${d.phone ? `<p class="guest-line">ტელეფონი: <a href="tel:${esc(d.phone.replace(/[^\d+]/g, ""))}">${esc(d.phone)}</a></p>` : ""}</div>${draft ? '<p class="preview-warning">წერისას გაზიარებული ცვლილებები. საბოლოოდ დასაფიქსირებლად საჭიროა შენახვა.</p>' : ""}<div class="entry-footer">${attribution}<button type="button" class="button small" data-action="edit" data-id="${esc(id)}" ${!state.connected || locked ? "disabled" : ""}>${locked ? "ახლა იწერება" : draft ? "გაგრძელება" : "რედაქტირება"}</button></div></div>` : ""}</article>`;
 }
 function moveMonth(delta) {
   const d = new Date(`${state.month}-15T12:00:00Z`);
@@ -959,6 +1007,14 @@ function installVisibility() {
 }
 
 $("loading-retry").addEventListener("click", boot);
+$("account-options").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-user-id]");
+  const user = state.users.find((candidate) => candidate.id === button?.dataset.userId);
+  if (user) selectAccount(user);
+});
+$("switch-account").addEventListener("click", () => {
+  switchAccount().catch((error) => toast(error.message));
+});
 $("previous-month").addEventListener("click", () => moveMonth(-1));
 $("next-month").addEventListener("click", () => moveMonth(1));
 $("today-button").addEventListener("click", () => {

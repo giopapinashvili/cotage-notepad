@@ -29,6 +29,13 @@
         <p id="loading-message">რვეული იხსნება…</p>
         <button id="loading-retry" class="button" hidden>ხელახლა ცდა</button>
       </section>
+      <section id="choose-user-screen" class="welcome" hidden>
+        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
+        <h1 data-app-name>აგარაკის ჯავშნები</h1>
+        <p>აირჩიე შენი სახელი</p>
+        <p id="choose-user-error" class="error" role="alert" hidden></p>
+        <div id="account-options" class="account-options"></div>
+      </section>
       <section id="app-screen" hidden>
         <header class="app-header">
           <div class="brand-row">
@@ -39,7 +46,12 @@
             </div>
           </div>
           <div class="family-row">
-            <div id="members" class="members" aria-label="ოჯახის წევრები"></div>
+            <div class="current-account">
+              <div id="members" class="members" aria-label="არჩეული ანგარიში"></div>
+              <button id="switch-account" class="text-button" type="button">
+                სახელის შეცვლა
+              </button>
+            </div>
             <div id="connection-status" class="connection" role="status">
               დაკავშირება…
             </div>

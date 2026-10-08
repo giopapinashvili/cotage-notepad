@@ -1,4 +1,4 @@
-const CACHE = "cottage-shell-v2";
+const CACHE = "cottage-shell-v3";
 const SHELL = [
   "/",
   "/index.html",

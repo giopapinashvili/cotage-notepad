@@ -1,7 +1,7 @@
 export const MEMBERS = [
-  { id: "giorgi", name: "გიორგი", role: "admin" },
-  { id: "deda", name: "დედა", role: "member" },
+  { id: "giorgi", name: "გიო", role: "admin" },
   { id: "veko", name: "ვეკო", role: "member" },
+  { id: "deda", name: "შორენა", role: "member" },
   { id: "lika", name: "ლიკა", role: "member" }
 ];
 export const FIELDS = [

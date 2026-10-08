@@ -16,12 +16,13 @@ const origin = "http://127.0.0.1:8791";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class Peer {
-  constructor(requestOrigin = origin) {
+  constructor(userId = "giorgi", requestOrigin = origin) {
     this.messages = [];
     this.waiters = new Set();
-    this.ws = new WebSocket(`${origin.replace("http:", "ws:")}/api/ws`, {
-      headers: { Origin: requestOrigin }
-    });
+    this.ws = new WebSocket(
+      `${origin.replace("http:", "ws:")}/api/ws?user=${userId}`,
+      { headers: { Origin: requestOrigin } }
+    );
     this.ws.on("message", (bytes) => {
       if (String(bytes) === "pong") return;
       const message = JSON.parse(String(bytes));
@@ -133,8 +134,8 @@ test(
       }
       return { response, data };
     }
-    async function peer(requestOrigin = origin) {
-      const result = new Peer(requestOrigin);
+    async function peer(userId = "giorgi", requestOrigin = origin) {
+      const result = new Peer(userId, requestOrigin);
       peers.push(result);
       await result.ready();
       return result;
@@ -159,8 +160,12 @@ test(
         async () => {
           const meta = await http("meta");
           assert.equal(meta.response.status, 200);
-          assert.ok(meta.data.users.some((user) => user.id === "family"));
-          assert.equal((await http("me")).data.user.name, "ოჯახი");
+          assert.deepEqual(
+            meta.data.users.map((user) => user.name),
+            ["გიო", "ვეკო", "შორენა", "ლიკა"]
+          );
+          assert.equal((await http("me?user=giorgi")).data.user.name, "გიო");
+          assert.equal((await http("me?user=unknown")).response.status, 400);
           assert.equal((await http("history")).response.status, 200);
           assert.equal((await http("export")).response.status, 200);
           assert.equal(
@@ -174,8 +179,8 @@ test(
           );
         }
       );
-      const giorgi = await peer(),
-        deda = await peer();
+      const giorgi = await peer("giorgi"),
+        deda = await peer("deda");
       let id, secondId;
       await t.test(
         "Typing is broadcast before Save; another editor cannot overwrite the active draft",
@@ -208,10 +213,37 @@ test(
           assert.equal(snapshot.bookings.length, 0);
           assert.equal(snapshot.drafts[0].data.guests, "8");
           await giorgi.request("edit.save", { id });
-          assert.equal(
-            (await deda.next((m) => m.type === "saved" && m.booking.id === id))
-              .booking.data.price,
-            "450.00"
+          const saved = await deda.next(
+            (m) => m.type === "saved" && m.booking.id === id
+          );
+          await giorgi.next((m) => m.type === "saved" && m.booking.id === id);
+          assert.equal(saved.booking.data.price, "450.00");
+          assert.equal(saved.booking.createdBy, "giorgi");
+          assert.equal(saved.booking.updatedBy, "giorgi");
+          await deda.request("edit.begin", { id });
+          await deda.next((m) => m.type === "editing" && m.draft.id === id);
+          await deda.request("edit.patch", {
+            id,
+            patch: { notes: "შორენამ განაახლა ჩანაწერი." }
+          });
+          await deda.request("edit.save", { id });
+          const updated = await giorgi.next(
+            (m) => m.type === "saved" && m.booking.id === id
+          );
+          assert.equal(updated.booking.createdBy, "giorgi");
+          assert.equal(updated.booking.updatedBy, "deda");
+          const history = (await http("history")).data.history.filter(
+            (item) => item.booking_id === id
+          );
+          assert.ok(
+            history.some(
+              (item) => item.action === "created" && item.user_id === "giorgi"
+            )
+          );
+          assert.ok(
+            history.some(
+              (item) => item.action === "updated" && item.user_id === "deda"
+            )
           );
         }
       );
@@ -321,6 +353,9 @@ test(
               (b) => b.id === replacement && b.data.status === "cancelled"
             )
           );
+          const original = backup.data.bookings.find((b) => b.id === id);
+          assert.equal(original.createdBy, "giorgi");
+          assert.equal(original.updatedBy, "deda");
           assert.equal(backup.data.format, "cottage-notebook-export-v1");
         }
       );

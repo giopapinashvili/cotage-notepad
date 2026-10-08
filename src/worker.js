@@ -11,7 +11,6 @@ import { checkOrigin, json } from "./security.js";
 
 const LEASE_MS = 65000;
 const MAX_BOOKINGS = 10000;
-const FAMILY_USER = { id: "family", name: "ოჯახი", role: "admin" };
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`,
   `CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL, starts_at INTEGER NOT NULL, ends_at INTEGER NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, created_at INTEGER NOT NULL)`,
@@ -62,6 +61,13 @@ export class FamilyNotebook extends DurableObject {
         this.sql.exec("DROP TABLE IF EXISTS users");
         this.sql.exec("INSERT OR IGNORE INTO schema_version(version) VALUES (2)");
       }
+      const bookingColumns = this.all("PRAGMA table_info(bookings)");
+      if (!bookingColumns.some((column) => column.name === "created_by")) {
+        this.sql.exec(
+          "ALTER TABLE bookings ADD COLUMN created_by TEXT NOT NULL DEFAULT 'family'"
+        );
+      }
+      this.sql.exec("INSERT OR IGNORE INTO schema_version(version) VALUES (3)");
     });
     ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong")
@@ -74,7 +80,12 @@ export class FamilyNotebook extends DurableObject {
     return this.sql.exec(query, ...args).toArray();
   }
   users() {
-    return [...MEMBERS, FAMILY_USER];
+    return MEMBERS;
+  }
+  userById(id) {
+    const user = MEMBERS.find((member) => member.id === id);
+    if (!user) throw new AppError("აირჩიე ოჯახის წევრი.", "USER_REQUIRED", 400);
+    return user;
   }
   async fetch(request) {
     try {
@@ -86,7 +97,7 @@ export class FamilyNotebook extends DurableObject {
         });
       if (request.method === "GET" && path === "/api/me")
         return json({
-          user: FAMILY_USER,
+          user: this.userById(new URL(request.url).searchParams.get("user")),
           appName: this.env.APP_NAME || "აგარაკის ჯავშნები"
         });
       if (request.method === "GET" && path === "/api/ws")
@@ -152,7 +163,8 @@ export class FamilyNotebook extends DurableObject {
       version: row.version,
       updatedAt: row.updated_at,
       updatedBy: row.updated_by,
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      createdBy: row.created_by
     };
   }
   drafts() {
@@ -183,6 +195,7 @@ export class FamilyNotebook extends DurableObject {
   }
   connect(request) {
     checkOrigin(request);
+    const user = this.userById(new URL(request.url).searchParams.get("user"));
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       throw new AppError("საჭიროა WebSocket კავშირი.", "UPGRADE_REQUIRED", 426);
     if (this.ctx.getWebSockets().length >= 32)
@@ -196,7 +209,7 @@ export class FamilyNotebook extends DurableObject {
       server = pair[1];
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({
-      user: FAMILY_USER,
+      user,
       connectionId: crypto.randomUUID(),
       window: Date.now(),
       count: 0
@@ -490,7 +503,7 @@ export class FamilyNotebook extends DurableObject {
       this.checkOverlap(draft.id, validated.start, validated.end);
       const packed = JSON.stringify(validated.data);
       this.sql.exec(
-        "INSERT INTO bookings(id,data,status,starts_at,ends_at,version,updated_at,updated_by,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,status=excluded.status,starts_at=excluded.starts_at,ends_at=excluded.ends_at,version=excluded.version,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+        "INSERT INTO bookings(id,data,status,starts_at,ends_at,version,updated_at,updated_by,created_at,created_by) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,status=excluded.status,starts_at=excluded.starts_at,ends_at=excluded.ends_at,version=excluded.version,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
         draft.id,
         packed,
         validated.data.status,
@@ -499,7 +512,8 @@ export class FamilyNotebook extends DurableObject {
         draft.base_version + 1,
         now,
         a.user.id,
-        before?.created_at || now
+        before?.created_at || now,
+        before?.created_by || a.user.id
       );
       this.sql.exec(
         "INSERT INTO history(booking_id,action,user_id,at,before_data,after_data) VALUES(?,?,?,?,?,?)",
