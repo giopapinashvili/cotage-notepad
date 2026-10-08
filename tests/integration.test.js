@@ -2,7 +2,7 @@
 // Never connects to a Cloudflare account or reads the project's real .dev.vars.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, cp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, join } from "node:path";
@@ -16,11 +16,11 @@ const origin = "http://127.0.0.1:8791";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class Peer {
-  constructor(cookie, requestOrigin = origin) {
+  constructor(requestOrigin = origin) {
     this.messages = [];
     this.waiters = new Set();
     this.ws = new WebSocket(`${origin.replace("http:", "ws:")}/api/ws`, {
-      headers: { Cookie: cookie, Origin: requestOrigin }
+      headers: { Origin: requestOrigin }
     });
     this.ws.on("message", (bytes) => {
       if (String(bytes) === "pong") return;
@@ -73,18 +73,11 @@ test(
   { timeout: 120000 },
   async (t) => {
     const folder = await mkdtemp(join(tmpdir(), "cottage-integration-"));
-    const setupToken = randomBytes(32).toString("hex"),
-      initialPin = "1234";
     await cp(join(root, "src"), join(folder, "src"), { recursive: true });
     await cp(join(root, "public"), join(folder, "public"), { recursive: true });
     await writeFile(
       join(folder, "package.json"),
       '{"private":true,"type":"module"}'
-    );
-    await writeFile(
-      join(folder, ".dev.vars"),
-      `SETUP_TOKEN=${setupToken}\n`,
-      { mode: 0o600 }
     );
     const config = JSON.parse(
       await readFile(join(root, "wrangler.jsonc"), "utf8")
@@ -119,13 +112,12 @@ test(
     child.stdout.on("data", (bytes) => (output += bytes));
     child.stderr.on("data", (bytes) => (output += bytes));
     const peers = [];
-    async function http(path, { body, cookie, requestOrigin = origin } = {}) {
+    async function http(path, { body, requestOrigin = origin } = {}) {
       const response = await fetch(`${origin}/api/${path}`, {
         method: body === undefined ? "GET" : "POST",
         headers: {
           Origin: requestOrigin,
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-          ...(cookie ? { Cookie: cookie } : {})
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(10000)
@@ -141,13 +133,8 @@ test(
       }
       return { response, data };
     }
-    async function login(user, pin = initialPin) {
-      const { response } = await http("login", { body: { user, pin } });
-      assert.equal(response.status, 200);
-      return response.headers.get("set-cookie").split(";")[0];
-    }
-    async function peer(cookie) {
-      const result = new Peer(cookie);
+    async function peer(requestOrigin = origin) {
+      const result = new Peer(requestOrigin);
       peers.push(result);
       await result.ready();
       return result;
@@ -168,50 +155,27 @@ test(
         await delay(200);
       }
       await t.test(
-        "Unauthenticated readers cannot access private data; origin and one-time setup are enforced",
+        "Shared notebook APIs open without passwords or setup codes",
         async () => {
-          for (const path of ["me", "history", "export", "ws"])
-            assert.equal((await http(path)).response.status, 401);
+          const meta = await http("meta");
+          assert.equal(meta.response.status, 200);
+          assert.ok(meta.data.users.some((user) => user.id === "family"));
+          assert.equal((await http("me")).data.user.name, "ოჯახი");
+          assert.equal((await http("history")).response.status, 200);
+          assert.equal((await http("export")).response.status, 200);
           assert.equal(
-            (
-              await http("login", {
-                body: {},
-                requestOrigin: "https://foreign.example"
-              })
-            ).response.status,
-            403
+            (await http("setup", { body: { token: "anything" } })).response
+              .status,
+            404
           );
           assert.equal(
-            (await http("setup", {
-              body: { token: "incorrect", pin: initialPin }
-            }))
-              .response.status,
-            403
-          );
-          assert.equal(
-            (await http("setup", {
-              body: { token: setupToken, pin: initialPin }
-            }))
-              .response.status,
-            201
-          );
-          assert.equal(
-            (await http("setup", {
-              body: { token: setupToken, pin: initialPin }
-            }))
-              .response.status,
-            409
-          );
-          assert.equal(
-            (await http("login", { body: null })).response.status,
-            400
+            (await http("login", { body: { pin: "1234" } })).response.status,
+            404
           );
         }
       );
-      const giorgiCookie = await login("giorgi"),
-        dedaCookie = await login("deda");
-      const giorgi = await peer(giorgiCookie),
-        deda = await peer(dedaCookie);
+      const giorgi = await peer(),
+        deda = await peer();
       let id, secondId;
       await t.test(
         "Typing is broadcast before Save; another editor cannot overwrite the active draft",
@@ -308,7 +272,7 @@ test(
               m.draft.data.notes.length === 10000
           );
           await giorgi.request("edit.release");
-          const reconnected = await peer(giorgiCookie);
+          const reconnected = await peer();
           await reconnected.request("sync");
           const current = await reconnected.next((m) => m.type === "snapshot");
           assert.equal(
@@ -326,7 +290,7 @@ test(
           await deda.request("edit.begin", { id });
           await deda.request("booking.cancel", { id });
           assert.ok(
-            (await http("history", { cookie: giorgiCookie })).data.history.some(
+            (await http("history")).data.history.some(
               (h) => h.booking_id === id && h.action === "cancelled"
             )
           );
@@ -350,29 +314,24 @@ test(
           await giorgi.request("edit.begin", { id: replacement });
           await giorgi.request("booking.cancel", { id: replacement });
           await deda.request("booking.restore", { id });
-          const backup = await http("export", { cookie: giorgiCookie });
+          const backup = await http("export");
           assert.equal(backup.response.status, 200);
           assert.ok(
             backup.data.bookings.some(
               (b) => b.id === replacement && b.data.status === "cancelled"
             )
           );
-          assert.ok(!JSON.stringify(backup.data).includes("password_hash"));
-          assert.equal(
-            (await http("export", { cookie: dedaCookie })).response.status,
-            403
-          );
+          assert.equal(backup.data.format, "cottage-notebook-export-v1");
         }
       );
       await t.test(
-        "Foreign-site WebSocket upgrades are refused even with a valid cookie",
+        "Foreign-site WebSocket upgrades are refused",
         async () => {
           await new Promise((resolve, reject) => {
             const socket = new WebSocket(
               `${origin.replace("http:", "ws:")}/api/ws`,
               {
                 headers: {
-                  Cookie: giorgiCookie,
                   Origin: "https://foreign.example"
                 }
               }
@@ -393,82 +352,6 @@ test(
             });
             socket.on("error", () => {});
           });
-        }
-      );
-      await t.test(
-        "Only admin can change the shared PIN; changing it ends all sessions",
-        async () => {
-          const newPin = "5678";
-          assert.equal(
-            (
-              await http("password", {
-                cookie: dedaCookie,
-                body: {
-                  currentPin: initialPin,
-                  pin: newPin
-                }
-              })
-            ).response.status,
-            403
-          );
-          const closedDeda = once(deda.ws, "close");
-          const closedGiorgi = once(giorgi.ws, "close");
-          assert.equal(
-            (
-              await http("password", {
-                cookie: giorgiCookie,
-                body: {
-                  currentPin: initialPin,
-                  pin: newPin
-                }
-              })
-            ).response.status,
-            200
-          );
-          assert.equal((await closedDeda)[0], 4001);
-          assert.equal((await closedGiorgi)[0], 4001);
-          assert.equal(
-            (await http("me", { cookie: dedaCookie })).response.status,
-            401
-          );
-          assert.equal(
-            (
-              await http("login", {
-                body: { user: "deda", pin: initialPin }
-              })
-            ).response.status,
-            401
-          );
-          const nextCookie = await login("deda", newPin);
-          assert.equal(
-            (await http("me", { cookie: nextCookie })).response.status,
-            200
-          );
-          const adminCookie = await login("giorgi", newPin);
-          const beforeRecovery = await http("export", { cookie: adminCookie });
-          assert.equal(beforeRecovery.response.status, 200);
-          assert.ok(beforeRecovery.data.bookings.length > 0);
-          assert.equal(
-            (
-              await http("setup", {
-                body: { token: setupToken, pin: "9012", recover: true }
-              })
-            ).response.status,
-            200
-          );
-          assert.equal(
-            (await http("me", { cookie: adminCookie })).response.status,
-            401
-          );
-          const recoveredAdmin = await login("giorgi", "9012");
-          const afterRecovery = await http("export", {
-            cookie: recoveredAdmin
-          });
-          assert.equal(afterRecovery.response.status, 200);
-          assert.equal(
-            afterRecovery.data.bookings.length,
-            beforeRecovery.data.bookings.length
-          );
         }
       );
     } finally {

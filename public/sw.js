@@ -1,4 +1,4 @@
-const CACHE = "cottage-shell-v1";
+const CACHE = "cottage-shell-v2";
 const SHELL = [
   "/",
   "/index.html",
@@ -48,7 +48,7 @@ self.addEventListener("message", (event) => {
 });
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  // Never cache a session, API response, booking, password or websocket request.
+  // Never cache API responses or websocket requests.
   if (
     event.request.method !== "GET" ||
     url.origin !== self.location.origin ||

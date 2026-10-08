@@ -7,28 +7,13 @@ import {
   validateBooking,
   validDate
 } from "./domain.js";
-import {
-  randomToken,
-  equal,
-  digest,
-  validPin,
-  pinHash,
-  checkOrigin,
-  readJSON,
-  getSessionToken,
-  sessionCookie,
-  json
-} from "./security.js";
+import { checkOrigin, json } from "./security.js";
 
 const LEASE_MS = 65000;
-const SESSION_MS = 30 * 86400000;
 const MAX_BOOKINGS = 10000;
+const FAMILY_USER = { id: "family", name: "ოჯახი", role: "admin" };
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`,
-  `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`,
-  `CREATE TABLE IF NOT EXISTS throttles (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL, starts_at INTEGER NOT NULL, ends_at INTEGER NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_bookings_active_interval ON bookings(starts_at, ends_at) WHERE status != 'cancelled'`,
   `CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY, data TEXT NOT NULL, base_version INTEGER NOT NULL, revision INTEGER NOT NULL, owner_id TEXT NOT NULL, connection_id TEXT, lease_until INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
@@ -68,7 +53,15 @@ export class FamilyNotebook extends DurableObject {
     // Durable Object schema is private to this one room; idempotent initial migration.
     ctx.storage.transactionSync(() => {
       for (const statement of SCHEMA) this.sql.exec(statement);
-      this.sql.exec("INSERT OR IGNORE INTO schema_version(version) VALUES (1)");
+      const version =
+        this.one("SELECT MAX(version) AS version FROM schema_version")?.version ||
+        0;
+      if (version < 2) {
+        this.sql.exec("DROP TABLE IF EXISTS sessions");
+        this.sql.exec("DROP TABLE IF EXISTS throttles");
+        this.sql.exec("DROP TABLE IF EXISTS users");
+        this.sql.exec("INSERT OR IGNORE INTO schema_version(version) VALUES (2)");
+      }
     });
     ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong")
@@ -80,81 +73,24 @@ export class FamilyNotebook extends DurableObject {
   all(query, ...args) {
     return this.sql.exec(query, ...args).toArray();
   }
-  configured() {
-    return Boolean(this.one("SELECT id FROM users LIMIT 1"));
-  }
   users() {
-    return this.all(
-      "SELECT id, name, role FROM users ORDER BY CASE id WHEN 'deda' THEN 0 WHEN 'veko' THEN 1 WHEN 'lika' THEN 2 ELSE 3 END"
-    );
-  }
-  sessionById(id) {
-    return this.one(
-      "SELECT sessions.id AS session_id, users.id, users.name, users.role FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.id = ? AND expires_at > ?",
-      id,
-      Date.now()
-    );
-  }
-  async session(request) {
-    const token = getSessionToken(request);
-    if (!/^[A-Za-z0-9_-]{40,100}$/.test(token))
-      throw new AppError("შედი ანგარიშში.", "UNAUTHENTICATED", 401);
-    const session = this.sessionById(await digest(token));
-    if (!session)
-      throw new AppError(
-        "სესია დასრულდა. ხელახლა შედი.",
-        "UNAUTHENTICATED",
-        401
-      );
-    return session;
-  }
-  throttle(key, maximum, windowMs) {
-    const now = Date.now(),
-      row = this.one(
-        "SELECT count, expires_at FROM throttles WHERE key = ?",
-        key
-      );
-    if (row && row.expires_at > now && row.count >= maximum)
-      throw new AppError(
-        "ბევრი მცდელობა დაფიქსირდა. ცოტა ხანში სცადე.",
-        "RATE_LIMIT",
-        429
-      );
-    this.sql.exec(
-      "INSERT INTO throttles(key,count,expires_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count = CASE WHEN expires_at <= ? THEN 1 ELSE count + 1 END, expires_at = CASE WHEN expires_at <= ? THEN ? ELSE expires_at END",
-      key,
-      now + windowMs,
-      now,
-      now,
-      now + windowMs
-    );
-  }
-  cleanExpired() {
-    this.sql.exec("DELETE FROM sessions WHERE expires_at <= ?", Date.now());
-    this.sql.exec("DELETE FROM throttles WHERE expires_at <= ?", Date.now());
+    return [...MEMBERS, FAMILY_USER];
   }
   async fetch(request) {
     try {
       const path = new URL(request.url).pathname;
       if (request.method === "GET" && path === "/api/meta")
         return json({
-          configured: this.configured(),
           users: this.users(),
           appName: this.env.APP_NAME || "აგარაკის ჯავშნები"
         });
-      if (!["GET", "HEAD"].includes(request.method)) checkOrigin(request);
-      if (request.method === "POST" && path === "/api/setup")
-        return await this.setup(request);
-      if (request.method === "POST" && path === "/api/login")
-        return await this.login(request);
-      const user = await this.session(request);
       if (request.method === "GET" && path === "/api/me")
         return json({
-          user: { id: user.id, name: user.name, role: user.role },
+          user: FAMILY_USER,
           appName: this.env.APP_NAME || "აგარაკის ჯავშნები"
         });
       if (request.method === "GET" && path === "/api/ws")
-        return this.connect(request, user);
+        return this.connect(request);
       if (request.method === "GET" && path === "/api/history")
         return json({
           history: this.all(
@@ -168,12 +104,6 @@ export class FamilyNotebook extends DurableObject {
           }))
         });
       if (request.method === "GET" && path === "/api/export") {
-        if (user.role !== "admin")
-          throw new AppError(
-            "მხოლოდ გიორგის შეუძლია სრული ასლის ჩამოტვირთვა.",
-            "FORBIDDEN",
-            403
-          );
         return json(
           {
             format: "cottage-notebook-export-v1",
@@ -191,15 +121,6 @@ export class FamilyNotebook extends DurableObject {
           }
         );
       }
-      if (request.method === "POST" && path === "/api/logout") {
-        this.sql.exec("DELETE FROM sessions WHERE id = ?", user.session_id);
-        this.revokeSockets(user.session_id);
-        return json({ ok: true }, 200, {
-          "Set-Cookie": sessionCookie(request, "", 0)
-        });
-      }
-      if (request.method === "POST" && path === "/api/password")
-        return await this.changePassword(request, user);
       throw new AppError("მისამართი ვერ მოიძებნა.", "NOT_FOUND", 404);
     } catch (error) {
       return this.errorResponse(error);
@@ -218,188 +139,6 @@ export class FamilyNotebook extends DurableObject {
       },
       error.status || 500
     );
-  }
-  async setup(request) {
-    if (
-      typeof this.env.SETUP_TOKEN !== "string" ||
-      this.env.SETUP_TOKEN.length < 24
-    )
-      throw new AppError(
-        "სერვერზე SETUP_TOKEN ჯერ დასაყენებელია.",
-        "SETUP_REQUIRED",
-        503
-      );
-    this.throttle(
-      `setup:${request.headers.get("CF-Connecting-IP") || "local"}`,
-      5,
-      900000
-    );
-    const body = await readJSON(request);
-    if (!equal(body.token, this.env.SETUP_TOKEN))
-      throw new AppError("გამართვის კოდი არასწორია.", "FORBIDDEN", 403);
-    validPin(body.pin);
-    const pin = body.pin;
-    if (this.configured()) {
-      if (body.recover !== true)
-        throw new AppError(
-          "ანგარიშები უკვე გამართულია. კოდის აღდგენისთვის აირჩიე შესაბამისი მოქმედება.",
-          "ALREADY_SETUP",
-          409
-        );
-      const existingUsers = this.users();
-      if (
-        existingUsers.length !== MEMBERS.length ||
-        MEMBERS.some((member) => !existingUsers.some((u) => u.id === member.id))
-      )
-        throw new AppError(
-          "ანგარიშების სია მოსალოდნელს არ ემთხვევა.",
-          "CONFLICT",
-          409
-        );
-      const rows = [];
-      for (const member of MEMBERS) {
-        const salt = randomToken(24);
-        rows.push({
-          id: member.id,
-          salt,
-          hash: await pinHash(pin, salt)
-        });
-      }
-      this.ctx.storage.transactionSync(() => {
-        if (!this.configured())
-          throw new AppError("ანგარიშები შეიცვალა. ხელახლა სცადე.", "CONFLICT", 409);
-        for (const row of rows)
-          this.sql.exec(
-            "UPDATE users SET salt=?, password_hash=? WHERE id=?",
-            row.salt,
-            row.hash,
-            row.id
-          );
-        this.sql.exec("DELETE FROM sessions");
-      });
-      for (const ws of this.ctx.getWebSockets()) {
-        const attachment = ws.deserializeAttachment();
-        this.releaseConnection(attachment.connectionId);
-        ws.close(4001, "Shared PIN recovered");
-      }
-      this.broadcastPresence();
-      return json({ ok: true, recovered: true });
-    }
-    const rows = [];
-    for (const member of MEMBERS) {
-      const salt = randomToken(24);
-      rows.push({
-        ...member,
-        salt,
-        hash: await pinHash(pin, salt)
-      });
-    }
-    this.ctx.storage.transactionSync(() => {
-      if (this.configured())
-        throw new AppError("გამართვა უკვე დასრულებულია.", "ALREADY_SETUP", 409);
-      for (const row of rows)
-        this.sql.exec(
-          "INSERT INTO users(id,name,role,salt,password_hash) VALUES(?,?,?,?,?)",
-          row.id,
-          row.name,
-          row.role,
-          row.salt,
-          row.hash
-        );
-    });
-    return json({ ok: true }, 201);
-  }
-  async login(request) {
-    this.cleanExpired();
-    this.throttle(
-      `login:${request.headers.get("CF-Connecting-IP") || "local"}`,
-      12,
-      900000
-    );
-    const body = await readJSON(request);
-    if (
-      typeof body.user !== "string" ||
-      typeof body.pin !== "string" ||
-      !/^\d{4}$/.test(body.pin)
-    )
-      throw new AppError("სახელი ან კოდი არასწორია.", "LOGIN_FAILED", 401);
-    const row = this.one("SELECT * FROM users WHERE id = ?", body.user);
-    const hash = await pinHash(
-      body.pin,
-      row?.salt || "unknown-user-constant-salt"
-    );
-    if (!row || !equal(hash, row.password_hash))
-      throw new AppError("სახელი ან კოდი არასწორია.", "LOGIN_FAILED", 401);
-    const token = randomToken(32),
-      sid = await digest(token);
-    const fresh = this.one(
-      "SELECT password_hash FROM users WHERE id = ?",
-      row.id
-    );
-    if (!fresh || fresh.password_hash !== row.password_hash)
-      throw new AppError("კოდი შეიცვალა. ხელახლა შედი.", "LOGIN_FAILED", 401);
-    this.sql.exec(
-      "INSERT INTO sessions(id,user_id,expires_at) VALUES(?,?,?)",
-      sid,
-      row.id,
-      Date.now() + SESSION_MS
-    );
-    return json({ user: { id: row.id, name: row.name, role: row.role } }, 200, {
-      "Set-Cookie": sessionCookie(request, token)
-    });
-  }
-  async changePassword(request, user) {
-    if (user.role !== "admin")
-      throw new AppError("საერთო კოდის შეცვლა მხოლოდ გიორგის შეუძლია.", "FORBIDDEN", 403);
-    this.throttle(`pin:${user.id}`, 5, 900000);
-    const body = await readJSON(request);
-    validPin(body.pin);
-    validPin(body.currentPin);
-    const current = this.one("SELECT * FROM users WHERE id = ?", user.id);
-    if (
-      !equal(await pinHash(body.currentPin, current.salt), current.password_hash)
-    )
-      throw new AppError("მიმდინარე კოდი არასწორია.", "LOGIN_FAILED", 401);
-    const rows = [];
-    for (const member of MEMBERS) {
-      const salt = randomToken(24);
-      rows.push({
-        id: member.id,
-        salt,
-        hash: await pinHash(body.pin, salt)
-      });
-    }
-    this.ctx.storage.transactionSync(() => {
-      if (!this.sessionById(user.session_id))
-        throw new AppError("სესია დასრულდა.", "UNAUTHENTICATED", 401);
-      if (
-        this.one("SELECT password_hash FROM users WHERE id=?", user.id)
-          ?.password_hash !== current.password_hash ||
-        this.users().length !== MEMBERS.length
-      )
-        throw new AppError(
-          "კოდი პარალელურად შეიცვალა. ხელახლა სცადე.",
-          "CONFLICT",
-          409
-        );
-      for (const row of rows)
-        this.sql.exec(
-          "UPDATE users SET salt=?, password_hash=? WHERE id=?",
-          row.salt,
-          row.hash,
-          row.id
-        );
-      this.sql.exec("DELETE FROM sessions");
-    });
-    for (const ws of this.ctx.getWebSockets()) {
-      const a = ws.deserializeAttachment();
-      this.releaseConnection(a.connectionId);
-      ws.close(4001, "Shared PIN changed");
-    }
-    this.broadcastPresence();
-    return json({ ok: true }, 200, {
-      "Set-Cookie": sessionCookie(request, "", 0)
-    });
   }
   bookings() {
     return this.all(
@@ -442,7 +181,7 @@ export class FamilyNotebook extends DurableObject {
       serverTime: Date.now()
     };
   }
-  connect(request, user) {
+  connect(request) {
     checkOrigin(request);
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       throw new AppError("საჭიროა WebSocket კავშირი.", "UPGRADE_REQUIRED", 426);
@@ -457,8 +196,7 @@ export class FamilyNotebook extends DurableObject {
       server = pair[1];
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({
-      user: { id: user.id, name: user.name, role: user.role },
-      sid: user.session_id,
+      user: FAMILY_USER,
       connectionId: crypto.randomUUID(),
       window: Date.now(),
       count: 0
@@ -481,14 +219,6 @@ export class FamilyNotebook extends DurableObject {
   broadcast(data) {
     const packet = JSON.stringify(data);
     for (const ws of this.ctx.getWebSockets()) {
-      const attachment = ws.deserializeAttachment();
-      // Never deliver new private data to an expired or revoked session.
-      if (!attachment || !this.sessionById(attachment.sid)) {
-        try {
-          ws.close(4001, "Session expired");
-        } catch {}
-        continue;
-      }
       try {
         ws.send(packet);
       } catch {}
@@ -527,10 +257,7 @@ export class FamilyNotebook extends DurableObject {
         return;
       }
       const a = ws.deserializeAttachment();
-      if (!a || !this.sessionById(a.sid)) {
-        ws.close(4001, "Session expired");
-        return;
-      }
+      if (!a) throw new AppError("კავშირის მონაცემები ვერ მოიძებნა.");
       const now = Date.now();
       if (now - a.window > 10000) {
         a.window = now;
@@ -894,15 +621,6 @@ export class FamilyNotebook extends DurableObject {
           this.one("SELECT * FROM drafts WHERE id=?", row.id)
         )
       });
-    }
-  }
-  revokeSockets(sid) {
-    for (const ws of this.ctx.getWebSockets()) {
-      const a = ws.deserializeAttachment();
-      if (a?.sid === sid) {
-        this.releaseConnection(a.connectionId);
-        ws.close(4001, "Signed out");
-      }
     }
   }
   webSocketClose(ws) {

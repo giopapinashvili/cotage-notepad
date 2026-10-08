@@ -3,13 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Private Georgian family booking notebook for Cloudflare Workers",
+  "description": "Shared Georgian cottage booking notebook for Cloudflare Workers",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check": "node --check src/worker.js && node --check public/app.js && node --check public/sw.js && node --test tests/domain.test.js",
-    "test:integration": "node --test tests/integration.test.js",
-    "secrets": "node scripts/make-secrets.mjs"
+    "test:integration": "node --test tests/integration.test.js"
   },
   "devDependencies": {
     "wrangler": "4.148.0",

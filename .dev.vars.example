@@ -1,3 +1,0 @@
-# Run npm run secrets to generate a real local-only value.
-# Never place this value in public/ or commit it to Git.
-SETUP_TOKEN=replace-with-a-different-random-token

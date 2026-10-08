@@ -55,9 +55,9 @@ const WEEKDAYS = [
   "პარასკევი",
   "შაბათი"
 ];
+const FAMILY = { id: "family", name: "ოჯახი", role: "admin" };
 const state = {
-  user: null,
-  setupRecovery: false,
+  user: FAMILY,
   users: [],
   bookings: new Map(),
   drafts: new Map(),
@@ -80,7 +80,6 @@ const state = {
   recovery: [],
   resumePending: false,
   firstSnapshot: true,
-  passwordUpdating: false,
   connecting: false,
   connectionAttempt: 0
 };
@@ -181,7 +180,7 @@ function renderRecovery() {
 }
 function rememberRecovery(patch, confirmed) {
   // Keep separate local versions until they are copied or explicitly discarded.
-  // Another device using the same family account must never erase this copy.
+  // Another device must never erase this local copy.
   for (const [key, value] of Object.entries(patch)) {
     if (confirmed?.[key] === value) continue;
     if (
@@ -206,7 +205,7 @@ function rejectRequests(message) {
   state.requests.clear();
 }
 function screen(name) {
-  for (const id of ["loading", "login", "setup", "app"])
+  for (const id of ["loading", "app"])
     $(`${id}-screen`).hidden = id !== name;
 }
 async function api(path, body) {
@@ -227,12 +226,6 @@ async function api(path, body) {
     const error = new Error(data.error || "მოთხოვნა ვერ შესრულდა.");
     error.code = data.code;
     error.status = response.status;
-    if (
-      error.code === "UNAUTHENTICATED" &&
-      state.user &&
-      !state.passwordUpdating
-    )
-      expireSession();
     throw error;
   }
   return data;
@@ -248,26 +241,7 @@ async function boot() {
       .querySelectorAll("[data-app-name]")
       .forEach((el) => (el.textContent = meta.appName));
     document.title = meta.appName;
-    if (!meta.configured) {
-      state.setupRecovery = false;
-      screen("setup");
-      return;
-    }
-    $("login-user").innerHTML = state.users
-      .map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`)
-      .join("");
-    try {
-      const preference = localStorage.getItem("cottage-member");
-      if (state.users.some((u) => u.id === preference))
-        $("login-user").value = preference;
-    } catch {}
-    try {
-      const result = await api("me");
-      enterApp(result.user);
-    } catch (error) {
-      if (error.status !== 401) throw error;
-      screen("login");
-    }
+    enterApp(FAMILY);
   } catch (error) {
     $("loading-message").textContent = navigator.onLine
       ? error.message
@@ -279,8 +253,6 @@ function enterApp(user) {
   state.user = user;
   state.firstSnapshot = true;
   screen("app");
-  $("account-button").textContent = user.name[0];
-  $("signed-in-label").textContent = `შესულია: ${user.name}`;
   renderMembers();
   renderList();
   connect();
@@ -310,7 +282,7 @@ function setConnected(connected) {
   }
 }
 function scheduleReconnect() {
-  if (!state.user || state.passwordUpdating) return;
+  if (!state.user) return;
   clearTimeout(state.retryTimer);
   state.retryTimer = setTimeout(
     connect,
@@ -329,15 +301,8 @@ async function connect() {
     userId = state.user.id;
   state.connecting = true;
   try {
-    // A rejected upgrade only exposes close code 1006 to browser JavaScript.
-    // Check the cookie over HTTP so revoked/expired sessions return to sign-in.
-    const result = await api("me");
     if (attempt !== state.connectionAttempt || state.user?.id !== userId)
       return;
-    if (result.user.id !== userId) {
-      expireSession();
-      return;
-    }
     const ws = new WebSocket(
       (location.protocol === "https:" ? "wss:" : "ws:") +
         "//" +
@@ -370,19 +335,11 @@ async function connect() {
       setConnected(false);
       renderMembers();
       rejectRequests("კავშირი გაწყდა. ცვლილება გადაამოწმე.");
-      if (event.code === 4001) {
-        if (!state.passwordUpdating) expireSession();
-        return;
-      }
       scheduleReconnect();
     };
     ws.onerror = () => {};
   } catch (error) {
     if (attempt !== state.connectionAttempt) return;
-    if (error.status === 401 && !state.passwordUpdating) {
-      expireSession();
-      return;
-    }
     setConnected(false);
     scheduleReconnect();
   } finally {
@@ -524,6 +481,7 @@ function receive(msg) {
 }
 function renderMembers() {
   $("members").innerHTML = state.users
+    .filter((u) => u.id === FAMILY.id)
     .map(
       (u) =>
         `<span class="member${state.connected && state.presence.includes(u.id) ? " online" : ""}" data-member="${esc(u.id)}" aria-label="${esc(u.name)}${state.connected && state.presence.includes(u.id) ? " — დაკავშირებულია" : ""}"><span class="member-avatar" aria-hidden="true">${esc(u.name[0])}</span><span>${esc(u.name)}</span></span>`
@@ -984,28 +942,6 @@ async function history() {
     $("history-list").textContent = error.message;
   }
 }
-function expireSession() {
-  clearTimeout(state.retryTimer);
-  state.connectionAttempt++;
-  state.connecting = false;
-  state.user = null;
-  const ws = state.ws;
-  state.ws = null;
-  ws?.close();
-  rejectRequests("სესია დასრულდა. ხელახლა შედი.");
-  state.bookings.clear();
-  state.drafts.clear();
-  state.presence = [];
-  closeEditor(true);
-  setConnected(false);
-  document.querySelectorAll("dialog[open]").forEach((d) => d.close());
-  $("booking-list").innerHTML = "";
-  $("history-list").innerHTML = "";
-  $("password-form").reset();
-  $("login-pin").value = "";
-  screen("login");
-  errorAt("login-error", "სესია დასრულდა. ხელახლა შედი.");
-}
 async function install() {
   if (deferredInstall) {
     deferredInstall.prompt();
@@ -1022,66 +958,6 @@ function installVisibility() {
     .forEach((button) => (button.hidden = installed));
 }
 
-$("login-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const button = event.submitter;
-  button.disabled = true;
-  errorAt("login-error", "");
-  try {
-    const result = await api("login", {
-      user: $("login-user").value,
-      pin: $("login-pin").value
-    });
-    try {
-      localStorage.setItem("cottage-member", $("login-user").value);
-    } catch {}
-    $("login-pin").value = "";
-    enterApp(result.user);
-  } catch (error) {
-    errorAt("login-error", error.message);
-  } finally {
-    button.disabled = false;
-  }
-});
-$("setup-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.target,
-    button = event.submitter,
-    recovering = state.setupRecovery;
-  button.disabled = true;
-  errorAt("setup-error", "");
-  try {
-    await api("setup", {
-      token: form.elements.token.value,
-      pin: form.elements.pin.value,
-      recover: recovering
-    });
-    form.reset();
-    state.setupRecovery = false;
-    toast(
-      recovering
-        ? "საერთო კოდი აღდგა. შედი ახალი კოდით."
-        : "ოჯახის საერთო კოდი მზადაა. შედი 4-ციფრიანი კოდით."
-    );
-    await boot();
-  } catch (error) {
-    errorAt("setup-error", error.message);
-  } finally {
-    button.disabled = false;
-  }
-});
-$("setup-open").addEventListener("click", () => {
-  state.setupRecovery = true;
-  $("setup-back").hidden = false;
-  screen("setup");
-});
-$("setup-back").addEventListener("click", () => {
-  state.setupRecovery = false;
-  $("setup-back").hidden = true;
-  $("setup-form").reset();
-  errorAt("setup-error", "");
-  screen("login");
-});
 $("loading-retry").addEventListener("click", boot);
 $("previous-month").addEventListener("click", () => moveMonth(-1));
 $("next-month").addEventListener("click", () => moveMonth(1));
@@ -1146,39 +1022,6 @@ $("history-list").addEventListener("click", async (event) => {
     toast(error.message);
   }
 });
-$("account-button").addEventListener("click", () => {
-  $("account-name").textContent = state.user.name;
-  $("password-form").hidden = state.user.role !== "admin";
-  $("backup-actions").hidden = state.user.role !== "admin";
-  errorAt("password-error", "");
-  $("account-dialog").showModal();
-});
-$("password-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.target;
-  if (form.elements.pin.value !== form.elements.confirm.value) {
-    errorAt("password-error", "ახალი კოდები ერთმანეთს არ ემთხვევა.");
-    return;
-  }
-  const button = event.submitter;
-  button.disabled = true;
-  state.passwordUpdating = true;
-  try {
-    await api("password", {
-      currentPin: form.elements.currentPin.value,
-      pin: form.elements.pin.value
-    });
-    form.reset();
-    expireSession();
-    errorAt("login-error", "საერთო კოდი შეიცვალა. შედი ახალი კოდით.");
-  } catch (error) {
-    errorAt("password-error", error.message);
-  } finally {
-    button.disabled = false;
-    state.passwordUpdating = false;
-    if (state.user && !state.ws) connect();
-  }
-});
 $("export-button").addEventListener("click", async () => {
   try {
     const response = await fetch("/api/export", { cache: "no-store" });
@@ -1189,21 +1032,6 @@ $("export-button").addEventListener("click", async () => {
     a.download = `cottage-bookings-${today()}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } catch (error) {
-    toast(error.message);
-  }
-});
-$("logout-button").addEventListener("click", async () => {
-  if (
-    !(await confirmAction(
-      "გამოხვალ რვეულიდან? ხელახლა შესასვლელად საერთო კოდი დაგჭირდება."
-    ))
-  )
-    return;
-  try {
-    await api("logout", {});
-    expireSession();
-    errorAt("login-error", "");
   } catch (error) {
     toast(error.message);
   }
@@ -1230,7 +1058,7 @@ window.addEventListener("offline", () => {
   state.ws?.close();
 });
 window.addEventListener("online", () => {
-  if (state.user && !state.ws) connect();
+  if (!state.ws) connect();
   else if (!$("loading-screen").hidden) boot();
 });
 window.addEventListener("beforeunload", (event) => {
@@ -1240,7 +1068,7 @@ window.addEventListener("beforeunload", (event) => {
   }
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && state.user) {
+  if (document.visibilityState === "visible") {
     if (!state.ws) connect();
     else if (Date.now() - lastPong > 40000) state.ws.close();
   }
@@ -1287,7 +1115,7 @@ if ("serviceWorker" in navigator) {
     })
     .catch(() => {});
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    // clients.claim() on first install must not reload a filled setup/login form.
+    // clients.claim() on first install must not reload a form with unsaved text.
     if (!hadController) {
       hadController = true;
       return;
@@ -1295,10 +1123,7 @@ if ("serviceWorker" in navigator) {
     if (refreshing) return;
     if (
       state.editingId ||
-      hasUnshared() ||
-      Array.from(document.querySelectorAll("input[type=password]")).some(
-        (input) => input.value
-      )
+      hasUnshared()
     ) {
       updateReloadPending = true;
       $("update-banner").hidden = false;

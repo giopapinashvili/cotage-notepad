@@ -29,80 +29,6 @@
         <p id="loading-message">რვეული იხსნება…</p>
         <button id="loading-retry" class="button" hidden>ხელახლა ცდა</button>
       </section>
-      <section id="login-screen" class="welcome" hidden>
-        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
-        <h1 data-app-name>აგარაკის ჯავშნები</h1>
-        <p class="muted">ჩვენი საერთო რვეული</p>
-        <form id="login-form" class="auth-form">
-          <label
-            >ვინ ხარ?<select
-              id="login-user"
-              name="username"
-              autocomplete="username"
-              required
-            ></select
-          ></label>
-          <label
-            >საერთო კოდი<input
-              id="login-pin"
-              name="pin"
-              type="password"
-              inputmode="numeric"
-              pattern="[0-9]{4}"
-              autocomplete="one-time-code"
-              required
-              minlength="4"
-              maxlength="4"
-          /></label>
-          <p id="login-error" class="error" role="alert" hidden></p>
-          <button class="button primary full" type="submit">შესვლა</button>
-        </form>
-        <p class="footnote">მხოლოდ ჩვენი ოჯახისთვის</p>
-        <button id="setup-open" class="text-button" type="button">
-          კოდის დაყენება ან აღდგენა
-        </button>
-        <button class="text-button install-action" type="button">
-          ტელეფონზე დაყენება
-        </button>
-      </section>
-      <section id="setup-screen" class="welcome" hidden>
-        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
-        <h1>პირველი გამართვა</h1>
-        <p class="muted">
-          შეიყვანე გამართვის კოდი და დააყენე ოჯახის საერთო 4-ციფრიანი PIN.
-        </p>
-        <form id="setup-form" class="auth-form">
-          <label
-            >გამართვის კოდი<input
-              name="token"
-              type="password"
-              autocomplete="off"
-              required
-          /></label>
-          <label
-            >საერთო კოდი<input
-              name="pin"
-              type="password"
-              inputmode="numeric"
-              pattern="[0-9]{4}"
-              autocomplete="new-password"
-              minlength="4"
-              maxlength="4"
-              value="1234"
-              required
-          /></label>
-          <p class="footnote">
-            საწყისი კოდია 1234. ოჯახის ყველა წევრი ერთსა და იმავე კოდს გამოიყენებს.
-          </p>
-          <p id="setup-error" class="error" role="alert" hidden></p>
-          <button type="submit" class="button primary full">
-            კოდის დაყენება
-          </button>
-          <button id="setup-back" class="text-button full" type="button" hidden>
-            შესვლაზე დაბრუნება
-          </button>
-        </form>
-      </section>
       <section id="app-screen" hidden>
         <header class="app-header">
           <div class="brand-row">
@@ -111,12 +37,6 @@
               <h1 data-app-name>აგარაკის ჯავშნები</h1>
               <p>ჩვენი საერთო რვეული</p>
             </div>
-            <button
-              id="account-button"
-              class="avatar-button"
-              type="button"
-              aria-label="ჩემი ანგარიში"
-            ></button>
           </div>
           <div class="family-row">
             <div id="members" class="members" aria-label="ოჯახის წევრები"></div>
@@ -148,6 +68,8 @@
               დღეს</button
             ><button id="history-button" class="button small" type="button">
               ისტორია</button
+            ><button id="export-button" class="button small" type="button">
+              ასლის ჩამოტვირთვა</button
             ><button class="button small install-action" type="button">
               დაყენება
             </button>
@@ -164,10 +86,7 @@
         </div>
         <section id="booking-list" aria-label="თარიღები და ჯავშნები"></section>
         <footer class="app-footer">
-          <span id="signed-in-label"></span
-          ><button id="logout-button" class="text-button" type="button">
-            გამოსვლა
-          </button>
+          <span>საერთო რვეული</span>
         </footer>
         <div class="bottom-action">
           <button
@@ -332,63 +251,6 @@
         </button>
       </div>
       <div id="history-list"></div>
-    </dialog>
-    <dialog id="account-dialog" class="sheet" aria-labelledby="account-title">
-      <div class="dialog-heading">
-        <h2 id="account-title">ჩემი ანგარიში</h2>
-        <button
-          class="icon-button"
-          data-close="account-dialog"
-          aria-label="დახურვა"
-          type="button"
-        >
-          ×
-        </button>
-      </div>
-      <p id="account-name"></p>
-      <form id="password-form">
-        <label
-          >მიმდინარე საერთო კოდი<input
-            name="currentPin"
-            type="password"
-            inputmode="numeric"
-            pattern="[0-9]{4}"
-            required
-            minlength="4"
-            maxlength="4" /></label
-        ><label
-          >ახალი საერთო კოდი<input
-            name="pin"
-            type="password"
-            inputmode="numeric"
-            pattern="[0-9]{4}"
-            autocomplete="new-password"
-            required
-            minlength="4"
-            maxlength="4" /></label
-        ><label
-          >გაიმეორე ახალი კოდი<input
-            name="confirm"
-            type="password"
-            inputmode="numeric"
-            pattern="[0-9]{4}"
-            autocomplete="new-password"
-            required
-            minlength="4"
-            maxlength="4"
-        /></label>
-        <p class="footnote">
-          კოდი ყველასთვის შეიცვლება. ოჯახის წევრებს ხელახლა შესვლა მოუწევთ.
-        </p>
-        <p id="password-error" class="error" role="alert" hidden></p>
-        <button class="button primary" type="submit">საერთო კოდის შეცვლა</button>
-      </form>
-      <div id="backup-actions" class="form-section" hidden>
-        <h3>ჯავშნების ასლი</h3>
-        <button id="export-button" class="button" type="button">
-          სარეზერვო ასლის ჩამოტვირთვა
-        </button>
-      </div>
     </dialog>
     <dialog id="install-dialog" class="sheet" aria-labelledby="install-title">
       <div class="dialog-heading">
