@@ -17,6 +17,6 @@ await writeFile(
   `# PRIVATE: do not commit or upload this file.\nSETUP_TOKEN=${setupToken}\n`,
   { mode: 0o600 }
 );
-console.log(".dev.vars მომზადებულია: APP_SECRET ამ აპს აღარ სჭირდება.");
+console.log(".dev.vars მზადაა. დამატებითი სერვერის კოდი საჭირო არ არის.");
 console.log("პირველი განთავსება: npx wrangler deploy --secrets-file .dev.vars");
 console.log("შემდეგი განახლებები: npm run deploy.");

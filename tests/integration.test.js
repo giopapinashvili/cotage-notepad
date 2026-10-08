@@ -136,7 +136,7 @@ test(
         data = JSON.parse(text);
       } catch {
         throw new Error(
-          `/api/${path} returned non-JSON (${response.status}): ${text.slice(0, 500)}`
+          `/api/${path} returned non-JSON (${response.status}): ${text.slice(0, 500)}\n${output.slice(-2000)}`
         );
       }
       return { response, data };
