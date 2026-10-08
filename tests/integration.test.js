@@ -185,9 +185,39 @@ test(
       await t.test(
         "Typing is broadcast before Save; another editor cannot overwrite the active draft",
         async () => {
-          await giorgi.request("edit.new", { date: "2027-06-12" });
-          id = (await giorgi.next((m) => m.type === "editing")).draft.id;
+          await giorgi.request("edit.new", { date: "2027-06-09" });
+          const abandoned = (
+            await giorgi.next((m) => m.type === "editing")
+          ).draft;
+          assert.equal(abandoned.data.start_date, "2027-06-09");
+          assert.equal(abandoned.data.end_date, "2027-06-10");
+          await deda.next(
+            (m) => m.type === "draft" && m.draft.id === abandoned.id
+          );
+          await giorgi.request("edit.release");
+          const released = await deda.next(
+            (m) => m.type === "draft" && m.draft.id === abandoned.id
+          );
+          assert.equal(released.draft.leaseUntil, 0);
+          await giorgi.request("edit.new", { date: "2027-06-15" });
+          const newBooking = (
+            await giorgi.next((m) => m.type === "editing")
+          ).draft;
+          assert.notEqual(newBooking.id, abandoned.id);
+          assert.equal(newBooking.data.start_date, "2027-06-15");
+          assert.equal(newBooking.data.end_date, "2027-06-16");
+          id = newBooking.id;
           await deda.next((m) => m.type === "draft" && m.draft.id === id);
+          await giorgi.request("edit.begin", { id: abandoned.id });
+          await giorgi.next(
+            (m) => m.type === "editing" && m.draft.id === abandoned.id
+          );
+          await giorgi.request("edit.discard", { id: abandoned.id });
+          await deda.next(
+            (m) => m.type === "discarded" && m.id === abandoned.id
+          );
+          await giorgi.request("edit.begin", { id });
+          await giorgi.next((m) => m.type === "editing" && m.draft.id === id);
           await giorgi.request("edit.patch", {
             id,
             patch: {
@@ -250,7 +280,7 @@ test(
       await t.test(
         "Concurrent overlapping reservations are rejected; exact same-day turnover is allowed",
         async () => {
-          await deda.request("edit.new", { date: "2027-06-13" });
+          await deda.request("edit.new", { date: "2027-06-16" });
           secondId = (await deda.next((m) => m.type === "editing")).draft.id;
           await deda.request("edit.patch", {
             id: secondId,
@@ -326,7 +356,7 @@ test(
               (h) => h.booking_id === id && h.action === "cancelled"
             )
           );
-          await giorgi.request("edit.new", { date: "2027-06-12" });
+          await giorgi.request("edit.new", { date: "2027-06-15" });
           const replacement = (
             await giorgi.next(
               (m) =>

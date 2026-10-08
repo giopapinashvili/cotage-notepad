@@ -624,17 +624,20 @@ function bookingCard(record, date) {
     active = draft && draft.leaseUntil > Date.now();
   const status =
     draft && !record.committed
-      ? "draft"
-      : ["confirmed", "hold", "blocked"].includes(d.status)
+      ? active
+        ? "draft"
+        : null
+      : active && draft
         ? d.status
-        : record.committed?.status;
-  const statusText =
-    (status === "draft" ? "ივსება" : STATUS[status] || "ჩანაწერი") +
-    (draft && record.committed && status !== record.committed.status
+        : record.committed?.status || d.status;
+  const statusText = status
+    ? (status === "draft" ? "ივსება" : STATUS[status] || "ჩანაწერი") +
+    (active && draft && record.committed && status !== record.committed.status
       ? " · იცვლება"
-      : "");
-  const writer = draft
-    ? `${memberName(draft.ownerId)} · ${active ? "წერს…" : "დაუმთავრებელი ჩანაწერი"}`
+      : "")
+    : "";
+  const writer = active && draft
+    ? `${memberName(draft.ownerId)} წერს…`
     : "";
   const locked = active && state.editingId !== id;
   const priceOK =
@@ -653,7 +656,7 @@ function bookingCard(record, date) {
         ? record.draft.ownerId
         : record.updatedBy),
     attribution = `<span class="booking-attribution"><span class="last-edited">შექმნა: ${esc(memberName(createdBy))}</span>${record.updatedAt ? `<span class="last-edited">ბოლო ცვლილება: ${esc(memberName(record.updatedBy))} · ${esc(shortTime(record.updatedAt))}</span>` : ""}</span>`;
-  return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-booking-id="${esc(id)}" data-date="${date}"><button type="button" class="entry-header" data-action="toggle" data-id="${esc(id)}" aria-expanded="${open}"><span><span class="entry-title">${esc(rangeLabel(headerData))}</span><span class="status status-${esc(status)}">${esc(statusText)}</span>${writer ? `<span class="writer">${esc(writer)}</span>` : ""}</span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body"><div class="stay-line"><span>შესვლა: ${esc(d.start_date)} · ${esc(d.start_time)}</span><span>გასვლა: ${esc(d.end_date)} · ${esc(d.end_time)}</span></div>${d.status !== "blocked" ? `<div class="detail-group"><div class="detail-label">ადამიანების რაოდენობა</div><div class="detail-value">${esc(d.guests || "—")} სტუმარი</div></div><div class="detail-group"><div class="detail-label">ფასი · სრული თანხა</div><div class="detail-value">${esc(money(d.price))}</div><div class="payments"><div><span class="payment-label">ავანსი</span><span class="payment-value">${esc(money(d.deposit))}</span></div><div><span class="payment-label">დარჩენილი</span><span class="payment-value">${esc(balance)}</span></div></div></div>` : ""}<div class="detail-group"><div class="detail-label">დამატებითი ინფორმაცია</div><p class="note-text">${esc(d.notes || "დამატებითი ინფორმაცია არ არის.")}</p>${d.guest_name ? `<p class="guest-line">სტუმარი: ${esc(d.guest_name)}</p>` : ""}${d.phone ? `<p class="guest-line">ტელეფონი: <a href="tel:${esc(d.phone.replace(/[^\d+]/g, ""))}">${esc(d.phone)}</a></p>` : ""}</div>${draft ? '<p class="preview-warning">წერისას გაზიარებული ცვლილებები. საბოლოოდ დასაფიქსირებლად საჭიროა შენახვა.</p>' : ""}<div class="entry-footer">${attribution}<button type="button" class="button small" data-action="edit" data-id="${esc(id)}" ${!state.connected || locked ? "disabled" : ""}>${locked ? "ახლა იწერება" : draft ? "გაგრძელება" : "რედაქტირება"}</button></div></div>` : ""}</article>`;
+  return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-booking-id="${esc(id)}" data-date="${date}"><button type="button" class="entry-header" data-action="toggle" data-id="${esc(id)}" aria-expanded="${open}"><span><span class="entry-title">${esc(rangeLabel(headerData))}</span>${statusText ? `<span class="status status-${esc(status)}">${esc(statusText)}</span>` : ""}${writer ? `<span class="writer">${esc(writer)}</span>` : ""}</span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body"><div class="stay-line"><span>შესვლა: ${esc(d.start_date)} · ${esc(d.start_time)}</span><span>გასვლა: ${esc(d.end_date)} · ${esc(d.end_time)}</span></div>${d.status !== "blocked" ? `<div class="detail-group"><div class="detail-label">ადამიანების რაოდენობა</div><div class="detail-value">${esc(d.guests || "—")} სტუმარი</div></div><div class="detail-group"><div class="detail-label">ფასი · სრული თანხა</div><div class="detail-value">${esc(money(d.price))}</div><div class="payments"><div><span class="payment-label">ავანსი</span><span class="payment-value">${esc(money(d.deposit))}</span></div><div><span class="payment-label">დარჩენილი</span><span class="payment-value">${esc(balance)}</span></div></div></div>` : ""}<div class="detail-group"><div class="detail-label">დამატებითი ინფორმაცია</div><p class="note-text">${esc(d.notes || "დამატებითი ინფორმაცია არ არის.")}</p>${d.guest_name ? `<p class="guest-line">სტუმარი: ${esc(d.guest_name)}</p>` : ""}${d.phone ? `<p class="guest-line">ტელეფონი: <a href="tel:${esc(d.phone.replace(/[^\d+]/g, ""))}">${esc(d.phone)}</a></p>` : ""}</div>${draft ? '<p class="preview-warning">წერისას გაზიარებული ცვლილებები. საბოლოოდ დასაფიქსირებლად საჭიროა შენახვა.</p>' : ""}<div class="entry-footer">${attribution}<button type="button" class="button small" data-action="edit" data-id="${esc(id)}" ${!state.connected || locked ? "disabled" : ""}>${locked ? "ახლა იწერება" : draft ? "გაგრძელება" : "რედაქტირება"}</button></div></div>` : ""}</article>`;
 }
 function moveMonth(delta) {
   const d = new Date(`${state.month}-15T12:00:00Z`);

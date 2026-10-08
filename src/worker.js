@@ -360,10 +360,10 @@ export class FamilyNotebook extends DurableObject {
   beginNew(ws, a, msg) {
     if (!validDate(msg.date)) throw new AppError("აირჩიე სწორი თარიღი.");
     this.releaseConnection(a.connectionId);
-    const existing = this.one(
-      "SELECT id FROM drafts WHERE base_version=0 AND owner_id=? LIMIT 1",
+    const existing = this.all(
+      "SELECT id, data FROM drafts WHERE base_version=0 AND owner_id=? ORDER BY updated_at DESC",
       a.user.id
-    );
+    ).find((draft) => JSON.parse(draft.data).start_date === msg.date);
     if (existing) {
       this.beginEdit(ws, a, { id: existing.id });
       return;
