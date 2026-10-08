@@ -57,6 +57,7 @@ const WEEKDAYS = [
 ];
 const state = {
   user: null,
+  setupRecovery: false,
   users: [],
   bookings: new Map(),
   drafts: new Map(),
@@ -248,6 +249,7 @@ async function boot() {
       .forEach((el) => (el.textContent = meta.appName));
     document.title = meta.appName;
     if (!meta.configured) {
+      state.setupRecovery = false;
       screen("setup");
       return;
     }
@@ -1044,22 +1046,41 @@ $("login-form").addEventListener("submit", async (event) => {
 $("setup-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target,
-    button = event.submitter;
+    button = event.submitter,
+    recovering = state.setupRecovery;
   button.disabled = true;
   errorAt("setup-error", "");
   try {
     await api("setup", {
       token: form.elements.token.value,
-      pin: form.elements.pin.value
+      pin: form.elements.pin.value,
+      recover: recovering
     });
     form.reset();
-    toast("ოჯახის საერთო კოდი მზადაა. შედი 4-ციფრიანი კოდით.");
+    state.setupRecovery = false;
+    toast(
+      recovering
+        ? "საერთო კოდი აღდგა. შედი ახალი კოდით."
+        : "ოჯახის საერთო კოდი მზადაა. შედი 4-ციფრიანი კოდით."
+    );
     await boot();
   } catch (error) {
     errorAt("setup-error", error.message);
   } finally {
     button.disabled = false;
   }
+});
+$("setup-open").addEventListener("click", () => {
+  state.setupRecovery = true;
+  $("setup-back").hidden = false;
+  screen("setup");
+});
+$("setup-back").addEventListener("click", () => {
+  state.setupRecovery = false;
+  $("setup-back").hidden = true;
+  $("setup-form").reset();
+  errorAt("setup-error", "");
+  screen("login");
 });
 $("loading-retry").addEventListener("click", boot);
 $("previous-month").addEventListener("click", () => moveMonth(-1));

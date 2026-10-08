@@ -444,6 +444,31 @@ test(
             (await http("me", { cookie: nextCookie })).response.status,
             200
           );
+          const adminCookie = await login("giorgi", newPin);
+          const beforeRecovery = await http("export", { cookie: adminCookie });
+          assert.equal(beforeRecovery.response.status, 200);
+          assert.ok(beforeRecovery.data.bookings.length > 0);
+          assert.equal(
+            (
+              await http("setup", {
+                body: { token: setupToken, pin: "9012", recover: true }
+              })
+            ).response.status,
+            200
+          );
+          assert.equal(
+            (await http("me", { cookie: adminCookie })).response.status,
+            401
+          );
+          const recoveredAdmin = await login("giorgi", "9012");
+          const afterRecovery = await http("export", {
+            cookie: recoveredAdmin
+          });
+          assert.equal(afterRecovery.response.status, 200);
+          assert.equal(
+            afterRecovery.data.bookings.length,
+            beforeRecovery.data.bookings.length
+          );
         }
       );
     } finally {

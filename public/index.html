@@ -58,6 +58,9 @@
           <button class="button primary full" type="submit">შესვლა</button>
         </form>
         <p class="footnote">მხოლოდ ჩვენი ოჯახისთვის</p>
+        <button id="setup-open" class="text-button" type="button">
+          კოდის დაყენება ან აღდგენა
+        </button>
         <button class="text-button install-action" type="button">
           ტელეფონზე დაყენება
         </button>
@@ -65,7 +68,9 @@
       <section id="setup-screen" class="welcome" hidden>
         <img class="brand-icon" src="/icons/icon-192.png" alt="" />
         <h1>პირველი გამართვა</h1>
-        <p class="muted">ერთხელ დააყენე ოჯახის საერთო 4-ციფრიანი კოდი.</p>
+        <p class="muted">
+          შეიყვანე გამართვის კოდი და დააყენე ოჯახის საერთო 4-ციფრიანი PIN.
+        </p>
         <form id="setup-form" class="auth-form">
           <label
             >გამართვის კოდი<input
@@ -91,7 +96,10 @@
           </p>
           <p id="setup-error" class="error" role="alert" hidden></p>
           <button type="submit" class="button primary full">
-            რვეულის გახსნა
+            კოდის დაყენება
+          </button>
+          <button id="setup-back" class="text-button full" type="button" hidden>
+            შესვლაზე დაბრუნება
           </button>
         </form>
       </section>

@@ -220,12 +220,6 @@ export class FamilyNotebook extends DurableObject {
     );
   }
   async setup(request) {
-    if (this.configured())
-      throw new AppError(
-        "პირველადი გამართვა უკვე დასრულებულია.",
-        "ALREADY_SETUP",
-        409
-      );
     if (
       typeof this.env.SETUP_TOKEN !== "string" ||
       this.env.SETUP_TOKEN.length < 24
@@ -245,6 +239,52 @@ export class FamilyNotebook extends DurableObject {
       throw new AppError("გამართვის კოდი არასწორია.", "FORBIDDEN", 403);
     validPin(body.pin);
     const pin = body.pin;
+    if (this.configured()) {
+      if (body.recover !== true)
+        throw new AppError(
+          "ანგარიშები უკვე გამართულია. კოდის აღდგენისთვის აირჩიე შესაბამისი მოქმედება.",
+          "ALREADY_SETUP",
+          409
+        );
+      const existingUsers = this.users();
+      if (
+        existingUsers.length !== MEMBERS.length ||
+        MEMBERS.some((member) => !existingUsers.some((u) => u.id === member.id))
+      )
+        throw new AppError(
+          "ანგარიშების სია მოსალოდნელს არ ემთხვევა.",
+          "CONFLICT",
+          409
+        );
+      const rows = [];
+      for (const member of MEMBERS) {
+        const salt = randomToken(24);
+        rows.push({
+          id: member.id,
+          salt,
+          hash: await pinHash(pin, salt)
+        });
+      }
+      this.ctx.storage.transactionSync(() => {
+        if (!this.configured())
+          throw new AppError("ანგარიშები შეიცვალა. ხელახლა სცადე.", "CONFLICT", 409);
+        for (const row of rows)
+          this.sql.exec(
+            "UPDATE users SET salt=?, password_hash=? WHERE id=?",
+            row.salt,
+            row.hash,
+            row.id
+          );
+        this.sql.exec("DELETE FROM sessions");
+      });
+      for (const ws of this.ctx.getWebSockets()) {
+        const attachment = ws.deserializeAttachment();
+        this.releaseConnection(attachment.connectionId);
+        ws.close(4001, "Shared PIN recovered");
+      }
+      this.broadcastPresence();
+      return json({ ok: true, recovered: true });
+    }
     const rows = [];
     for (const member of MEMBERS) {
       const salt = randomToken(24);
@@ -273,7 +313,7 @@ export class FamilyNotebook extends DurableObject {
     this.cleanExpired();
     this.throttle(
       `login:${request.headers.get("CF-Connecting-IP") || "local"}`,
-      5,
+      12,
       900000
     );
     const body = await readJSON(request);
