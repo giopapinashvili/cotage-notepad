@@ -55,12 +55,14 @@ const WEEKDAYS = [
   "პარასკევი",
   "შაბათი"
 ];
-const USER_STORAGE_KEY = "cottage-notebook-user";
-const ACCESS_STORAGE_KEY = "cottage-notebook-access-v1";
-const ACCESS_CODE = "20031003";
 const state = {
-  user: null,
-  users: [],
+  config: {},
+  // null until this browser saves something; then the browser notebook or a
+  // signed-up account (see /api/session).
+  session: null,
+  memberRequired: false,
+  mergeAsked: false,
+  snapshotWaiters: [],
   bookings: new Map(),
   drafts: new Map(),
   presence: [],
@@ -150,9 +152,21 @@ function money(value) {
     return "—";
   return `${new Intl.NumberFormat("ka-GE", { maximumFractionDigits: 2 }).format(Number(value))} ₾`;
 }
-function memberName(id) {
-  if (id === "family") return "ძველი ჩანაწერი";
-  return state.users.find((u) => u.id === id)?.name || "ოჯახის წევრი";
+function registered() {
+  return Boolean(state.session && !state.session.account.guest);
+}
+// The name under which this device writes (empty for a browser notebook).
+function myName() {
+  return state.session?.member?.name || "";
+}
+function personTone(name) {
+  let hash = 0;
+  for (const char of String(name)) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return "person-" + (hash % 6);
+}
+function personChip(name, extra = "") {
+  const initial = [...String(name).trim()][0] || "?";
+  return `<span class="person-chip ${personTone(name)} ${extra}"><span class="person-initial" aria-hidden="true">${esc(initial)}</span>${esc(name)}</span>`;
 }
 function placeToast() {
   const target =
@@ -210,12 +224,12 @@ function rejectRequests(message) {
   state.requests.clear();
 }
 function screen(name) {
-  for (const id of ["loading", "access", "choose-user", "app"])
+  for (const id of ["loading", "app"])
     $(`${id}-screen`).hidden = id !== name;
 }
-async function api(path, body) {
+async function api(path, body, method) {
   const response = await fetch(`/api/${path}`, {
-    method: body === undefined ? "GET" : "POST",
+    method: method || (body === undefined ? "GET" : "POST"),
     credentials: "same-origin",
     cache: "no-store",
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -236,96 +250,63 @@ async function api(path, body) {
   return data;
 }
 async function boot() {
-  try {
-    if (localStorage.getItem(ACCESS_STORAGE_KEY) !== "accepted") {
-      screen("access");
-      $("access-code").focus();
-      return;
-    }
-  } catch {
-    screen("access");
-    $("access-error").textContent =
-      "ბრაუზერის მეხსიერებაზე წვდომა ვერ მოხერხდა. ჩართე საიტის მონაცემების შენახვა და სცადე თავიდან.";
-    $("access-error").hidden = false;
-    return;
-  }
   screen("loading");
   $("loading-retry").hidden = true;
   $("loading-message").textContent = "რვეული იხსნება…";
+  const params = new URLSearchParams(location.search);
+  const notice = params.get("auth");
+  if (notice) history.replaceState(null, "", location.pathname);
   try {
-    const meta = await api("meta");
-    state.users = meta.users;
-    document
-      .querySelectorAll("[data-app-name]")
-      .forEach((el) => (el.textContent = meta.appName));
-    document.title = meta.appName;
-    $("account-options").innerHTML = meta.users
-      .map(
-        (user) =>
-          `<button class="button account-choice" type="button" data-user-id="${esc(user.id)}"><span class="member-avatar" aria-hidden="true">${esc(user.name[0])}</span>${esc(user.name)}</button>`
-      )
-      .join("");
-    let rememberedId;
-    try {
-      rememberedId = localStorage.getItem(USER_STORAGE_KEY);
-    } catch {
-      $("choose-user-error").textContent =
-        "ამ მოწყობილობაზე სახელი ვერ შეინახება; შემდეგ გახსნაზე თავიდან მოგიწევს არჩევა.";
-      $("choose-user-error").hidden = false;
-    }
-    const rememberedUser = meta.users.find((user) => user.id === rememberedId);
-    if (rememberedUser) enterApp(rememberedUser);
-    else screen("choose-user");
+    state.config = await api("config");
+    document.querySelectorAll("[data-app-name]").forEach((el) => (el.textContent = state.config.appName));
+    document.querySelectorAll("[data-google]").forEach((el) => (el.hidden = !state.config.googleReady));
+    const session = await api("session");
+    state.session = session.authenticated ? session : null;
   } catch (error) {
-    $("loading-message").textContent = navigator.onLine
-      ? error.message
-      : "ინტერნეტკავშირი არ არის. საერთო რვეულის გასახსნელად დაუკავშირდი ინტერნეტს.";
+    $("loading-message").textContent = navigator.onLine ? error.message : "ინტერნეტკავშირი არ არის. რვეულის გასახსნელად დაუკავშირდი ინტერნეტს.";
     $("loading-retry").hidden = false;
+    return;
   }
+  enterApp();
+  if (notice) showAuthNotice(notice);
 }
-function selectAccount(user) {
-  state.users = state.users.map((candidate) =>
-    candidate.id === user.id ? user : candidate
-  );
-  try {
-    localStorage.setItem(USER_STORAGE_KEY, user.id);
-    $("choose-user-error").hidden = true;
-  } catch {
-    toast("ამ მოწყობილობაზე სახელი ვერ შეინახა; შემდეგ გახსნაზე თავიდან მოგიწევს არჩევა.");
-  }
-  enterApp(user);
+function enterApp() {
+  state.firstSnapshot = true;
+  screen("app");
+  renderAccount();
+  renderList();
+  setConnected(false);
+  startSession();
 }
-async function switchAccount() {
-  if (state.editingId) {
-    await requestCloseEditor();
-    if (state.editingId) return;
+// Connect when there is a notebook and (for shared accounts) a chosen name.
+function startSession() {
+  if (!state.session) return;
+  if (registered() && !state.session.member) {
+    openMemberDialog({ required: true });
+    return;
   }
+  offerMerge();
+  connect();
+}
+function disconnect(message = "კავშირი შეიცვალა.") {
   const ws = state.ws;
-  state.user = null;
   state.connectionAttempt++;
   state.connecting = false;
   state.connected = false;
   state.ws = null;
   clearTimeout(state.retryTimer);
-  rejectRequests("ანგარიში შეიცვალა.");
+  rejectRequests(message);
   ws?.close();
-  screen("choose-user");
-}
-function enterApp(user) {
-  state.user = user;
-  state.firstSnapshot = true;
-  screen("app");
-  renderMembers();
-  renderList();
-  connect();
 }
 function setConnected(connected) {
   state.connected = connected;
   const node = $("connection-status");
   node.className = "connection" + (connected ? " connected" : "");
-  node.textContent = connected ? "დაკავშირებულია" : "კავშირი არ არის";
-  $("offline-banner").hidden = connected;
-  $("add-booking-button").disabled = !connected;
+  node.textContent = !state.session ? "" : connected ? "დაკავშირებულია" : "კავშირი არ არის";
+  $("offline-banner").hidden = connected || !state.session;
+  $("add-booking-button").disabled = Boolean(state.session) && !connected;
+  $("history-button").hidden = !state.session;
+  $("export-button").hidden = !state.session;
   if (state.editingId) {
     const blocked =
       !connected || !state.editorReady || Boolean(state.editorBusy);
@@ -344,8 +325,10 @@ function setConnected(connected) {
   }
 }
 function scheduleReconnect() {
-  if (!state.user) return;
+  if (!state.session) return;
   clearTimeout(state.retryTimer);
+  // After a few failures, make sure the sign-in is still valid.
+  if (state.retry === 2) recheckSession();
   state.retryTimer = setTimeout(
     connect,
     Math.min(15000, 1000 * 2 ** Math.min(state.retry++, 4))
@@ -353,23 +336,24 @@ function scheduleReconnect() {
 }
 async function connect() {
   if (
-    !state.user ||
+    !state.session ||
+    (registered() && !state.session.member) ||
     state.connecting ||
     (state.ws && state.ws.readyState !== WebSocket.CLOSED)
   )
     return;
   clearTimeout(state.retryTimer);
   const attempt = ++state.connectionAttempt,
-    userId = state.user.id;
+    sessionAtStart = state.session;
   state.connecting = true;
   try {
-    if (attempt !== state.connectionAttempt || state.user?.id !== userId)
+    if (attempt !== state.connectionAttempt || state.session !== sessionAtStart)
       return;
     const ws = new WebSocket(
       (location.protocol === "https:" ? "wss:" : "ws:") +
         "//" +
         location.host +
-        `/api/ws?user=${encodeURIComponent(userId)}`
+        "/api/ws"
     );
     state.ws = ws;
     lastPong = Date.now();
@@ -461,8 +445,8 @@ function receive(msg) {
   if (msg.type === "snapshot") {
     state.bookings = new Map(msg.bookings.map((b) => [b.id, b]));
     state.drafts = new Map(msg.drafts.map((d) => [d.id, d]));
-    state.users = msg.users;
     state.presence = msg.presence;
+    for (const resolve of state.snapshotWaiters.splice(0)) resolve();
     setConnected(true);
     renderMembers();
     renderList();
@@ -519,7 +503,7 @@ function receive(msg) {
     );
     state.openId = msg.booking.id;
     renderList();
-    toast(`${memberName(msg.by)}: ჯავშანი შენახულია`);
+    toast(msg.by ? `${msg.by}: ჯავშანი შენახულია` : "ჯავშანი შენახულია");
     return;
   }
   if (msg.type === "discarded" || msg.type === "cancelled") {
@@ -542,10 +526,12 @@ function receive(msg) {
   }
 }
 function renderMembers() {
-  const user = state.user;
-  $("members").innerHTML = user
-    ? `<span class="member${state.connected && state.presence.includes(user.id) ? " online" : ""}" data-member="${esc(user.id)}"><span class="member-avatar" aria-hidden="true">${esc(user.name[0])}</span><span>${esc(user.name)}</span></span>`
-    : "";
+  // Only shared (signed-up) notebooks show who is online.
+  const online = registered() && state.connected ? state.presence.filter((person) => person.name) : [];
+  $("members").innerHTML = online
+    .filter((person) => person.id !== state.session.member?.id)
+    .map((person) => `<span class="member online" title="ახლა ხაზზეა">${personChip(person.name, "small")}</span>`)
+    .join("");
 }
 function records() {
   const result = [];
@@ -616,7 +602,7 @@ function renderList() {
 function freeCard(date, after) {
   const id = `free-${date}`,
     open = state.openId === id;
-  return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-date="${date}"><button class="entry-header" data-action="toggle" data-id="${id}" type="button" aria-expanded="${open}"><span><span class="entry-title">${esc(dateLabel(date, true))}${date === today() ? '<span class="today-tag">დღეს</span>' : ""}</span><span class="status status-free">თავისუფალია${after ? ` ${esc(after)}-დან` : ""}</span></span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body">${after ? `<p class="footnote">წინა სტუმრის გასვლა: ${esc(after)}. ახალი ჯავშნის საათები გადაამოწმე.</p>` : ""}<button type="button" class="button primary" data-action="new" data-date="${date}" ${!state.connected ? "disabled" : ""}>+ ჯავშნის დამატება</button></div>` : ""}</article>`;
+  return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-date="${date}"><button class="entry-header" data-action="toggle" data-id="${id}" type="button" aria-expanded="${open}"><span><span class="entry-title">${esc(dateLabel(date, true))}${date === today() ? '<span class="today-tag">დღეს</span>' : ""}</span><span class="status status-free">თავისუფალია${after ? ` ${esc(after)}-დან` : ""}</span></span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body">${after ? `<p class="footnote">წინა სტუმრის გასვლა: ${esc(after)}. ახალი ჯავშნის საათები გადაამოწმე.</p>` : ""}<button type="button" class="button primary" data-action="new" data-date="${date}" ${state.session && !state.connected ? "disabled" : ""}>+ ჯავშნის დამატება</button></div>` : ""}</article>`;
 }
 function bookingCard(record, date) {
   const { id, data: d, draft } = record,
@@ -637,7 +623,9 @@ function bookingCard(record, date) {
       : "")
     : "";
   const writer = active && draft
-    ? `${memberName(draft.ownerId)} წერს…`
+    ? draft.ownerName && draft.ownerName !== myName()
+      ? `${draft.ownerName} წერს…`
+      : "ივსება…"
     : "";
   const locked = active && state.editingId !== id;
   const priceOK =
@@ -653,9 +641,10 @@ function bookingCard(record, date) {
   const createdBy =
       record.createdBy ||
       (record.draft?.baseVersion === 0
-        ? record.draft.ownerId
-        : record.updatedBy),
-    attribution = `<span class="booking-attribution"><span class="last-edited">შექმნა: ${esc(memberName(createdBy))}</span>${record.updatedAt ? `<span class="last-edited">ბოლო ცვლილება: ${esc(memberName(record.updatedBy))} · ${esc(shortTime(record.updatedAt))}</span>` : ""}</span>`;
+        ? record.draft.ownerName
+        : ""),
+    changedBy = record.committed ? record.updatedBy : "",
+    attribution = `<span class="booking-attribution">${createdBy ? `<span class="last-edited">შექმნა: ${esc(createdBy)}</span>` : ""}${record.updatedAt && record.committed ? `<span class="last-edited">ბოლო ცვლილება: ${changedBy ? `${esc(changedBy)} · ` : ""}${esc(shortTime(record.updatedAt))}</span>` : ""}</span>`;
   return `<article class="entry${date === today() ? " today" : ""}${open ? " is-open" : ""}" data-booking-id="${esc(id)}" data-date="${date}"><button type="button" class="entry-header" data-action="toggle" data-id="${esc(id)}" aria-expanded="${open}"><span><span class="entry-title">${esc(rangeLabel(headerData))}</span>${statusText ? `<span class="status status-${esc(status)}">${esc(statusText)}</span>` : ""}${writer ? `<span class="writer">${esc(writer)}</span>` : ""}</span><span class="entry-chevron" aria-hidden="true">⌄</span></button>${open ? `<div class="entry-body"><div class="stay-line"><span>შესვლა: ${esc(d.start_date)} · ${esc(d.start_time)}</span><span>გასვლა: ${esc(d.end_date)} · ${esc(d.end_time)}</span></div>${d.status !== "blocked" ? `<div class="detail-group"><div class="detail-label">ადამიანების რაოდენობა</div><div class="detail-value">${esc(d.guests || "—")} სტუმარი</div></div><div class="detail-group"><div class="detail-label">ფასი · სრული თანხა</div><div class="detail-value">${esc(money(d.price))}</div><div class="payments"><div><span class="payment-label">ავანსი</span><span class="payment-value">${esc(money(d.deposit))}</span></div><div><span class="payment-label">დარჩენილი</span><span class="payment-value">${esc(balance)}</span></div></div></div>` : ""}<div class="detail-group"><div class="detail-label">დამატებითი ინფორმაცია</div><p class="note-text">${esc(d.notes || "დამატებითი ინფორმაცია არ არის.")}</p>${d.guest_name ? `<p class="guest-line">სტუმარი: ${esc(d.guest_name)}</p>` : ""}${d.phone ? `<p class="guest-line">ტელეფონი: <a href="tel:${esc(d.phone.replace(/[^\d+]/g, ""))}">${esc(d.phone)}</a></p>` : ""}</div>${draft ? '<p class="preview-warning">წერისას გაზიარებული ცვლილებები. საბოლოოდ დასაფიქსირებლად საჭიროა შენახვა.</p>' : ""}<div class="entry-footer">${attribution}<button type="button" class="button small" data-action="edit" data-id="${esc(id)}" ${!state.connected || locked ? "disabled" : ""}>${locked ? "ახლა იწერება" : draft ? "გაგრძელება" : "რედაქტირება"}</button></div></div>` : ""}</article>`;
 }
 function moveMonth(delta) {
@@ -1003,7 +992,7 @@ async function history() {
           );
           const fmt = (key, value) =>
             key === "status" ? STATUS[value] || value : value;
-          return `<article class="history-item"><h3>${esc(actions[item.action] || item.action)}</h3><p>${esc(rangeLabel(item.after || item.before || {}))}</p><p class="history-meta">${esc(memberName(item.user_id))} · ${esc(shortTime(item.at))}</p><details><summary>რა შეიცვალა</summary><div class="history-changes">${changed.map((key) => `<p><strong>${esc(LABELS[key])}</strong><br>${item.before ? `<del>${esc(fmt(key, item.before[key]) || "—")}</del><br>` : ""}<ins>${esc(fmt(key, item.after?.[key]) || "—")}</ins></p>`).join("")}</div></details>${item.action === "cancelled" && latest.get(item.booking_id) === item.id && !state.bookings.has(item.booking_id) ? `<button type="button" class="button small" data-restore="${esc(item.booking_id)}">ჯავშნის აღდგენა</button>` : ""}</article>`;
+          return `<article class="history-item"><h3>${esc(actions[item.action] || item.action)}</h3><p>${esc(rangeLabel(item.after || item.before || {}))}</p><p class="history-meta">${item.actor ? `${esc(item.actor)} · ` : ""}${esc(shortTime(item.at))}</p><details><summary>რა შეიცვალა</summary><div class="history-changes">${changed.map((key) => `<p><strong>${esc(LABELS[key])}</strong><br>${item.before ? `<del>${esc(fmt(key, item.before[key]) || "—")}</del><br>` : ""}<ins>${esc(fmt(key, item.after?.[key]) || "—")}</ins></p>`).join("")}</div></details>${item.action === "cancelled" && latest.get(item.booking_id) === item.id && !state.bookings.has(item.booking_id) ? `<button type="button" class="button small" data-restore="${esc(item.booking_id)}">ჯავშნის აღდგენა</button>` : ""}</article>`;
         })
         .join("") || '<p class="empty">ცვლილებები ჯერ არ არის.</p>';
   } catch (error) {
@@ -1024,7 +1013,7 @@ function showInstallGuidance() {
   if (!$("install-dialog").open) $("install-dialog").showModal();
 }
 function maybePromptInstall() {
-  if (!state.user || installPromptAttempted) return;
+  if (!state.session || installPromptAttempted) return;
   const installed =
     matchMedia("(display-mode: standalone)").matches ||
     navigator.standalone === true;
@@ -1055,35 +1044,6 @@ function installVisibility() {
 
 $("loading-retry").addEventListener("click", boot);
 document.addEventListener("click", maybePromptInstall);
-$("access-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const input = $("access-code");
-  if (input.value !== ACCESS_CODE) {
-    $("access-error").textContent = "პაროლი არასწორია.";
-    $("access-error").hidden = false;
-    input.select();
-    return;
-  }
-  try {
-    localStorage.setItem(ACCESS_STORAGE_KEY, "accepted");
-  } catch {
-    $("access-error").textContent =
-      "პაროლი სწორია, მაგრამ ამ მოწყობილობაზე დამახსოვრება ვერ მოხერხდა. ჩართე საიტის მონაცემების შენახვა და სცადე თავიდან.";
-    $("access-error").hidden = false;
-    return;
-  }
-  input.value = "";
-  $("access-error").hidden = true;
-  boot();
-});
-$("account-options").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-user-id]");
-  const user = state.users.find((candidate) => candidate.id === button?.dataset.userId);
-  if (user) selectAccount(user);
-});
-$("switch-account").addEventListener("click", () => {
-  switchAccount().catch((error) => toast(error.message));
-});
 $("previous-month").addEventListener("click", () => moveMonth(-1));
 $("next-month").addEventListener("click", () => moveMonth(1));
 $("today-button").addEventListener("click", () => {
@@ -1100,7 +1060,7 @@ $("booking-list").addEventListener("click", async (event) => {
         state.openId === button.dataset.id ? null : button.dataset.id;
       renderList();
     } else if (button.dataset.action === "new")
-      await send("edit.new", { date: button.dataset.date });
+      await startBooking(button.dataset.date);
     else if (button.dataset.action === "edit")
       await send("edit.begin", { id: button.dataset.id });
   } catch (error) {
@@ -1110,7 +1070,7 @@ $("booking-list").addEventListener("click", async (event) => {
 $("add-booking-button").addEventListener("click", () => {
   const date =
     state.month === today().slice(0, 7) ? today() : `${state.month}-01`;
-  send("edit.new", { date }).catch((error) => toast(error.message));
+  startBooking(date).catch((error) => toast(error.message));
 });
 $("editor-form").addEventListener("input", queuePatch);
 $("editor-form").addEventListener("change", (event) => {
@@ -1184,8 +1144,8 @@ window.addEventListener("offline", () => {
   state.ws?.close();
 });
 window.addEventListener("online", () => {
-  if (!state.ws) connect();
-  else if (!$("loading-screen").hidden) boot();
+  if (!$("loading-screen").hidden) boot();
+  else if (!state.ws) connect();
 });
 window.addEventListener("beforeunload", (event) => {
   if (hasUnshared()) {
@@ -1275,5 +1235,414 @@ document.querySelectorAll("dialog").forEach((dialog) =>
     if (dialog.contains($("toast"))) placeToast();
   })
 );
+
+// ---- Notebook, accounts and names ----
+function waitForSnapshot(ms = 12000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("რვეული ვერ გაიხსნა. შეამოწმე ინტერნეტი და სცადე ხელახლა.")), ms);
+    state.snapshotWaiters.push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+// The first booking in this browser creates the browser's own notebook.
+async function startBooking(date) {
+  if (!state.session) {
+    state.session = await api("notebook", {});
+    renderAccount();
+    const ready = waitForSnapshot();
+    connect();
+    await ready;
+  } else if (registered() && !state.session.member) {
+    openMemberDialog({ required: true });
+    return;
+  }
+  await send("edit.new", { date });
+}
+function resetNotebookView() {
+  state.bookings = new Map();
+  state.drafts = new Map();
+  state.presence = [];
+  state.openId = null;
+}
+function goFresh(message) {
+  disconnect("გამოხვედი ექაუნთიდან.");
+  if (state.editingId) closeEditor(true);
+  state.session = null;
+  state.mergeAsked = false;
+  resetNotebookView();
+  for (const dialog of document.querySelectorAll("dialog[open]")) if (dialog.id !== "auth-dialog") dialog.close();
+  renderAccount();
+  renderList();
+  setConnected(false);
+  if (message) toast(message);
+}
+async function recheckSession() {
+  try {
+    const session = await api("session");
+    if (!session.authenticated) {
+      const wasRegistered = registered();
+      goFresh();
+      if (wasRegistered) openAuth("login", "შესვლის ვადა ამოიწურა. შედი ხელახლა.");
+      return;
+    }
+    state.session = session;
+    renderAccount();
+    if (registered() && !session.member) {
+      disconnect();
+      openMemberDialog({ required: true });
+    }
+  } catch {}
+}
+const USER_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21c1-4 4-6 8-6s7 2 8 6" /></svg>';
+function renderAccount() {
+  const isRegistered = registered();
+  const member = isRegistered ? state.session.member : null;
+  $("guest-card").hidden = isRegistered;
+  $("family-row").hidden = !isRegistered;
+  $("member-chip-name").textContent = member?.name || "აირჩიე სახელი";
+  $("member-chip").classList.toggle("missing", isRegistered && !member);
+  const avatar = $("account-button");
+  avatar.hidden = !isRegistered;
+  avatar.className = "account-avatar" + (member ? ` ${personTone(member.name)}` : "");
+  avatar.innerHTML = member ? `<span aria-hidden="true">${esc([...member.name.trim()][0] || "?")}</span>` : USER_ICON;
+  $("app-subtitle").textContent = isRegistered ? state.session.account.email : "შენი ჯავშნების რვეული";
+  renderMembers();
+}
+// After signing in or up: start again with the account's own notebook.
+function enterSession(session) {
+  disconnect();
+  if (state.editingId) closeEditor(true);
+  state.session = session;
+  state.mergeAsked = false;
+  state.firstSnapshot = true;
+  resetNotebookView();
+  renderAccount();
+  renderList();
+  setConnected(false);
+  startSession();
+}
+
+function openMemberDialog({ required = false } = {}) {
+  if (!registered()) return;
+  state.memberRequired = required || !state.session.member;
+  const members = state.session.members || [];
+  const currentId = state.session.member?.id;
+  $("member-title").textContent = members.length ? "ვინ ხარ?" : "რა გქვია?";
+  $("member-copy").textContent = members.length
+    ? "აირჩიე შენი სახელი. ის გამოჩნდება ყველა ჯავშანზე, რომელსაც დაამატებ ან შეცვლი."
+    : "სახელი გამოჩნდება შენს ჩანაწერებზე. ოჯახის სხვა წევრები შესვლისას თავიანთ სახელს დაამატებენ.";
+  $("member-options").innerHTML = members
+    .map((member) => `<button type="button" class="member-option${member.id === currentId ? " current" : ""}" data-member="${esc(member.id)}">${personChip(member.name)}${member.id === currentId ? '<span class="member-now">ახლა</span>' : ""}</button>`)
+    .join("");
+  $("member-options").hidden = !members.length;
+  $("member-add-label").textContent = members.length ? "ან დაამატე შენი სახელი" : "შენი სახელი";
+  $("member-cancel").hidden = state.memberRequired;
+  $("member-form").reset();
+  errorAt("member-error", "");
+  if (!$("member-dialog").open) $("member-dialog").showModal();
+  if (!members.length) $("member-name").focus();
+}
+function memberChosen(session) {
+  state.session = session;
+  state.memberRequired = false;
+  if ($("member-dialog").open) $("member-dialog").close();
+  renderAccount();
+  toast(`ახლა წერს: ${session.member.name}`);
+  // Reconnect so others see the new name.
+  disconnect();
+  startSession();
+  if ($("account-dialog").open) showAccount();
+}
+async function selectMember(id, button) {
+  button.disabled = true;
+  try {
+    memberChosen(await api("session/member", { memberId: id }, "PUT"));
+  } catch (error) {
+    errorAt("member-error", error.message);
+    button.disabled = false;
+  }
+}
+
+function offerMerge() {
+  const count = state.session?.guestBookings || 0;
+  if (!registered() || !state.session.member || state.mergeAsked || !count) return;
+  state.mergeAsked = true;
+  $("merge-copy").textContent = `შესვლამდე ამ ბრაუზერში ${count} ჯავშანი ჩაწერე. გადმოვიტანოთ ამ ექაუნთში? თარიღით დამთხვეული ჯავშანი არ გადმოვა. თუ არ გადმოიტან, ის ჯავშნები წაიშლება.`;
+  errorAt("merge-error", "");
+  $("merge-keep").disabled = false;
+  $("merge-drop").disabled = false;
+  $("merge-dialog").showModal();
+}
+async function finishMerge(keep, button) {
+  button.disabled = true;
+  try {
+    const result = await api("account/merge", { keep });
+    $("merge-dialog").close();
+    toast(keep ? `გადმოვიდა ${result.imported} ჯავშანი${result.skipped ? `, ${result.skipped} თარიღის დამთხვევის გამო არ გადმოვიდა` : ""}` : "ამ ბრაუზერის ჯავშნები წაიშალა");
+    const session = await api("session");
+    if (session.authenticated) state.session = session;
+  } catch (error) {
+    errorAt("merge-error", error.message);
+    button.disabled = false;
+  }
+}
+
+function selectAuthTab(mode) {
+  const login = mode === "login";
+  $("tab-login").setAttribute("aria-selected", String(login));
+  $("tab-register").setAttribute("aria-selected", String(!login));
+  $("login-form").hidden = !login;
+  $("register-form").hidden = login;
+  $("auth-title").textContent = login ? "შესვლა" : "ექაუნთის შექმნა";
+  $("auth-lead").textContent = login ? "შედი და შენი ჯავშნები ნებისმიერი მოწყობილობიდან გექნება." : "რაც უკვე ჩაწერე, ექაუნთში დარჩება. მერე ოჯახთან ერთადაც იმუშავებ.";
+  const from = login ? $("register-email") : $("login-email"),
+    to = login ? $("login-email") : $("register-email");
+  if (from.value && !to.value) to.value = from.value;
+}
+function openAuth(mode = "register", message = "") {
+  selectAuthTab(mode);
+  errorAt("login-error", mode === "login" ? message : "");
+  errorAt("register-error", mode === "register" ? message : "");
+  if (!$("auth-dialog").open) $("auth-dialog").showModal();
+  (mode === "login" ? $("login-email") : $("register-email")).focus();
+}
+async function submitAuth(form, path, errorId) {
+  if (!form.reportValidity()) return;
+  const email = form.elements.email.value.trim(),
+    password = (form.elements["current-password"] || form.elements["new-password"]).value,
+    button = form.querySelector('[type="submit"]');
+  if (state.editingId) {
+    errorAt(errorId, "ჯერ შეინახე ან დახურე ჯავშნის რედაქტირება.");
+    return;
+  }
+  button.disabled = true;
+  errorAt(errorId, "");
+  try {
+    const key = await window.passwordKey(email, password);
+    const session = await api(path, { email, key });
+    form.reset();
+    $("auth-dialog").close();
+    toast(path === "register" ? "ექაუნთი შეიქმნა" : "შეხვედი ექაუნთში");
+    enterSession(session);
+  } catch (error) {
+    errorAt(errorId, error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+const AUTH_NOTICES = {
+  "google-email-exists": ["login", "ეს ელფოსტა უკვე რეგისტრირებულია პაროლით. შედი პაროლით, მერე ექაუნთში Google-ს დააკავშირებ."],
+  "google-failed": ["login", "Google-ით შესვლა ვერ მოხერხდა. სცადე ხელახლა."],
+  "google-off": ["login", "Google-ით შესვლა ჯერ არ არის ჩართული. შედი ელფოსტით."],
+  "google-cancelled": ["toast", "Google-ით შესვლა გაუქმდა."],
+  "google-in-use": ["toast", "ეს Google ექაუნთი უკვე სხვა რვეულზეა მიბმული."],
+  "google-linked": ["toast", "Google დაუკავშირდა შენს ექაუნთს. ახლა Google-ითაც შეხვალ."]
+};
+function showAuthNotice(code) {
+  const notice = AUTH_NOTICES[code];
+  if (!notice) return;
+  if (notice[0] === "login") openAuth("login", notice[1]);
+  else toast(notice[1]);
+}
+
+function showAccount() {
+  const session = state.session;
+  if (!registered()) {
+    const count = state.bookings.size;
+    $("account-content").innerHTML = `<section class="account-section">
+        <p>${!session ? "რასაც ჩაწერ, შეინახება და მხოლოდ ამ ბრაუზერიდან გაიხსნება." : `შენი ${count} ჯავშანი ინახება და მხოლოდ ამ ბრაუზერიდან იხსნება.`} თუ ბრაუზერის მონაცემებს წაშლი, ამ რვეულს ვეღარ გახსნი.</p>
+        <p>დარეგისტრირდი, რომ ოჯახთან ერთად იმუშაო და ნებისმიერი მოწყობილობიდან შეხვიდე. რაც უკვე ჩაწერე, ადგილზე დარჩება.</p>
+        <button class="button primary full" type="button" data-auth="register">რეგისტრაცია</button>
+        <button class="button full" type="button" data-auth="login">შესვლა არსებულ ექაუნთში</button>
+      </section>`;
+  } else {
+    const { account, members, member } = session;
+    const google = state.config.googleReady
+      ? account.hasGoogle
+        ? '<p class="status-line">✓ Google დაკავშირებულია</p>'
+        : '<a class="button full" href="/auth/google?mode=link">Google-ის დაკავშირება</a>'
+      : "";
+    $("account-content").innerHTML = `<section class="account-section">
+        <h3>ვინ წერს ამ მოწყობილობიდან</h3>
+        <div class="current-person">${member ? personChip(member.name) : '<span class="muted">სახელი არჩეული არ არის</span>'}</div>
+        <button class="button full" type="button" data-account="member">სხვა სახელის არჩევა</button>
+      </section>
+      <section class="account-section">
+        <h3>ოჯახის სახელები</h3>
+        <p class="muted">ყველა, ვინც ამ ექაუნთით შედის, აქედან ირჩევს თავის სახელს. სახელის წაშლისას მისი ძველი ჩანაწერები უცვლელი რჩება.</p>
+        <ul class="member-list">${members.map((item) => `<li>${personChip(item.name)}<button class="text-button danger" type="button" data-remove-member="${esc(item.id)}" aria-label="${esc(item.name)} — წაშლა">წაშლა</button></li>`).join("")}</ul>
+        <form id="account-member-form" class="inline-form">
+          <label for="account-member-name" class="sr-only">ახალი სახელი</label>
+          <input id="account-member-name" name="member-name" maxlength="40" autocomplete="off" placeholder="ახალი სახელი" required />
+          <button class="button" type="submit">დამატება</button>
+        </form>
+        <p id="account-member-error" class="error" role="alert" hidden></p>
+      </section>
+      <section class="account-section">
+        <h3>ექაუნთი</h3>
+        <p class="account-email">${esc(account.email)}</p>
+        ${google}
+        <form id="password-form" class="settings-form">
+          <input type="text" name="username" autocomplete="username" value="${esc(account.email)}" class="sr-only" tabindex="-1" readonly aria-hidden="true" />
+          <label for="account-password">${account.hasPassword ? "პაროლის შეცვლა" : "პაროლის დაყენება"}
+            <span class="password-field">
+              <input id="account-password" name="new-password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required />
+              <button type="button" class="reveal" aria-label="პაროლის ჩვენება" aria-pressed="false">ნახვა</button>
+            </span>
+          </label>
+          <p class="footnote">${account.hasPassword ? "უკვე შესული მოწყობილობები შესული დარჩება." : "პაროლით ოჯახის სხვა წევრებიც შეძლებენ ამ ელფოსტით შესვლას."}</p>
+          <p id="password-error" class="error" role="alert" hidden></p>
+          <button class="button full" type="submit">პაროლის შენახვა</button>
+        </form>
+        <button class="button full" type="button" data-account="sign-out-others">სხვა მოწყობილობებიდან გასვლა</button>
+        <button class="button full" type="button" data-account="logout">გასვლა</button>
+      </section>`;
+  }
+  if (!$("account-dialog").open) $("account-dialog").showModal();
+}
+async function removeMember(id) {
+  const member = state.session.members.find((item) => item.id === id);
+  if (!member || !(await confirmAction(`„${member.name}“ სიიდან წაიშლება. მისი ჩაწერილი ჯავშნები და ისტორია უცვლელი დარჩება. წავშალოთ?`))) return;
+  try {
+    state.session = await api(`members/${encodeURIComponent(id)}`, undefined, "DELETE");
+    renderAccount();
+    showAccount();
+    toast("სახელი წაიშალა");
+    if (!state.session.member) {
+      disconnect();
+      openMemberDialog({ required: true });
+    }
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function signOutOthers(button) {
+  if (!(await confirmAction("ყველა სხვა ტელეფონი და კომპიუტერი გამოვა ექაუნთიდან და ხელახლა შესვლა დასჭირდება. ეს მოწყობილობა შესული დარჩება. გავაგრძელოთ?"))) return;
+  button.disabled = true;
+  try {
+    const result = await api("account/sign-out-others", {});
+    toast(result.signedOut ? `გამოვიდა ${result.signedOut} მოწყობილობა` : "სხვა შესული მოწყობილობა არ იყო");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+async function logout(button) {
+  if (state.editingId) {
+    toast("ჯერ შეინახე ან დახურე ჯავშნის რედაქტირება.");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await api("logout", {});
+    $("account-dialog").close();
+    goFresh("გამოხვედი ექაუნთიდან");
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("button, a");
+  if (!target) return;
+  if (target.matches(".reveal")) {
+    const input = target.parentElement.querySelector("input"),
+      shown = input.type === "text";
+    input.type = shown ? "password" : "text";
+    target.setAttribute("aria-pressed", String(!shown));
+    target.textContent = shown ? "ნახვა" : "დამალვა";
+    return;
+  }
+  if (target.dataset.auth) {
+    const host = target.closest("dialog");
+    if (host && host.id !== "auth-dialog") host.close();
+    openAuth(target.dataset.auth);
+    return;
+  }
+  if (target.dataset.authTab) return selectAuthTab(target.dataset.authTab);
+  if (target.dataset.member) return selectMember(target.dataset.member, target);
+  if (target.dataset.removeMember) return removeMember(target.dataset.removeMember);
+  const action = target.dataset.account;
+  if (action === "member") {
+    if (state.editingId) return toast("ჯერ შეინახე ან დახურე ჯავშნის რედაქტირება.");
+    $("account-dialog").close();
+    openMemberDialog();
+  }
+  if (action === "sign-out-others") signOutOthers(target);
+  if (action === "logout") logout(target);
+});
+document.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (form.id === "account-member-form") {
+    event.preventDefault();
+    const name = form.elements["member-name"].value.trim();
+    if (!name) return;
+    try {
+      state.session = await api("members", { name, select: false });
+      showAccount();
+      toast(`„${name}“ დაემატა სიაში`);
+    } catch (error) {
+      errorAt("account-member-error", error.message);
+    }
+  }
+  if (form.id === "password-form") {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const button = form.querySelector('[type="submit"]');
+    button.disabled = true;
+    errorAt("password-error", "");
+    try {
+      const key = await window.passwordKey(state.session.account.email, form.elements["new-password"].value);
+      state.session = await api("account/password", { key });
+      showAccount();
+      toast("პაროლი შენახულია");
+    } catch (error) {
+      errorAt("password-error", error.message);
+      button.disabled = false;
+    }
+  }
+});
+$("member-chip").addEventListener("click", () => {
+  if (state.editingId) return toast("ჯერ შეინახე ან დახურე ჯავშნის რედაქტირება.");
+  openMemberDialog();
+});
+$("account-button").addEventListener("click", showAccount);
+$("member-dialog").addEventListener("cancel", (event) => {
+  if (state.memberRequired) event.preventDefault();
+});
+$("member-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = event.currentTarget.elements["member-name"].value.trim();
+  if (!name) return;
+  const button = event.currentTarget.querySelector('[type="submit"]');
+  button.disabled = true;
+  errorAt("member-error", "");
+  try {
+    memberChosen(await api("members", { name, select: true }));
+  } catch (error) {
+    errorAt("member-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("merge-keep").addEventListener("click", (event) => finishMerge(true, event.currentTarget));
+$("merge-drop").addEventListener("click", (event) => finishMerge(false, event.currentTarget));
+$("login-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitAuth(event.currentTarget, "login", "login-error");
+});
+$("register-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitAuth(event.currentTarget, "register", "register-error");
+});
+$("forgot-button").addEventListener("click", () => {
+  $("auth-dialog").close();
+  $("forgot-dialog").showModal();
+});
 installVisibility();
 boot();

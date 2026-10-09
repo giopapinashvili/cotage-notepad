@@ -1,8 +1,10 @@
-// Runs the actual Wrangler/workerd server with isolated temporary SQLite data.
-// Never connects to a Cloudflare account or reads the project's real .dev.vars.
+// Runs the real Wrangler/workerd server with isolated temporary storage.
+// Never connects to a Cloudflare account or reads the project's .dev.vars.
+// COTTAGE_URL=http://127.0.0.1:8788 runs the same checks against a server that
+// is already running instead (for example `wrangler pages dev` in front of it).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomUUID, webcrypto } from "node:crypto";
 import { mkdtemp, cp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, join } from "node:path";
@@ -12,17 +14,61 @@ import { once } from "node:events";
 import WebSocket from "ws";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const origin = "http://127.0.0.1:8791";
+const port = 8799;
+const external = process.env.COTTAGE_URL?.replace(/\/+$/, "");
+const origin = external || `http://127.0.0.1:${port}`;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Same stretching as public/password.js does in the browser.
+async function passwordKey(email, password) {
+  const encoder = new TextEncoder();
+  const material = await webcrypto.subtle.importKey("raw", encoder.encode(password.normalize("NFC")), "PBKDF2", false, ["deriveBits"]);
+  const bits = await webcrypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: encoder.encode("cottage-notebook-v1:" + email.trim().toLowerCase()), iterations: 150000 },
+    material,
+    256
+  );
+  return Buffer.from(bits).toString("base64url");
+}
+
+// One browser: keeps its own session cookie.
+function browser() {
+  const jar = { cookie: "" };
+  async function http(path, { body, method, requestOrigin = origin } = {}) {
+    const response = await fetch(`${origin}/api/${path}`, {
+      method: method || (body === undefined ? "GET" : "POST"),
+      headers: {
+        Origin: requestOrigin,
+        ...(jar.cookie ? { Cookie: jar.cookie } : {}),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(10000)
+    });
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie) {
+      const match = setCookie.match(/session=([^;]*)/);
+      if (match) jar.cookie = match[1] ? `session=${match[1]}` : "";
+    }
+    const text = await response.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`/api/${path} returned non-JSON (${response.status}): ${text.slice(0, 300)}`);
+    }
+    return { response, data };
+  }
+  return { jar, http };
+}
+
 class Peer {
-  constructor(userId = "giorgi", requestOrigin = origin) {
+  constructor(jar, requestOrigin = origin) {
     this.messages = [];
     this.waiters = new Set();
-    this.ws = new WebSocket(
-      `${origin.replace("http:", "ws:")}/api/ws?user=${userId}`,
-      { headers: { Origin: requestOrigin } }
-    );
+    this.ws = new WebSocket(`${origin.replace("http:", "ws:")}/api/ws`, {
+      headers: { Origin: requestOrigin, ...(jar?.cookie ? { Cookie: jar.cookie } : {}) }
+    });
     this.ws.on("message", (bytes) => {
       if (String(bytes) === "pong") return;
       const message = JSON.parse(String(bytes));
@@ -58,8 +104,7 @@ class Peer {
       answer = this.next((m) => m.requestId === requestId);
     this.ws.send(JSON.stringify({ type, ...payload, requestId }));
     const reply = await answer;
-    if (reply.type === "error")
-      throw Object.assign(new Error(reply.message), { code: reply.code });
+    if (reply.type === "error") throw Object.assign(new Error(reply.message), { code: reply.code });
   }
   async close() {
     if (this.ws.readyState === WebSocket.CLOSED) return;
@@ -69,25 +114,45 @@ class Peer {
   }
 }
 
-test(
-  "Family notebook: real HTTP, SQLite and two live WebSocket sessions",
-  { timeout: 120000 },
-  async (t) => {
-    const folder = await mkdtemp(join(tmpdir(), "cottage-integration-"));
+function refused(jar, requestOrigin = origin) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`${origin.replace("http:", "ws:")}/api/ws`, {
+      headers: { Origin: requestOrigin, ...(jar?.cookie ? { Cookie: jar.cookie } : {}) }
+    });
+    socket.on("unexpected-response", (_, response) => {
+      response.resume();
+      socket.terminate();
+      resolve(response.statusCode);
+    });
+    socket.on("open", () => {
+      socket.terminate();
+      reject(new Error("Connection was accepted"));
+    });
+    socket.on("error", () => {});
+  });
+}
+
+async function newBooking(peer, date, patch) {
+  await peer.request("edit.new", { date });
+  const draft = (await peer.next((m) => m.type === "editing")).draft;
+  if (patch) await peer.request("edit.patch", { id: draft.id, patch });
+  return draft.id;
+}
+
+test("Cottage notebooks: browser notebooks, accounts, names and live editing", { timeout: 180000 }, async (t) => {
+  let output = "",
+    folder = null,
+    child = null;
+  const processGroup = process.platform !== "win32";
+  if (!external) {
+    folder = await mkdtemp(join(tmpdir(), "cottage-integration-"));
     await cp(join(root, "src"), join(folder, "src"), { recursive: true });
     await cp(join(root, "public"), join(folder, "public"), { recursive: true });
-    await writeFile(
-      join(folder, "package.json"),
-      '{"private":true,"type":"module"}'
-    );
-    const config = JSON.parse(
-      await readFile(join(root, "wrangler.jsonc"), "utf8")
-    );
+    await writeFile(join(folder, "package.json"), '{"private":true,"type":"module"}');
+    const config = JSON.parse((await readFile(join(root, "wrangler.jsonc"), "utf8")).replace(/^\s*\/\/.*$/gm, ""));
     config.name = "cottage-integration-only";
     await writeFile(join(folder, "wrangler.jsonc"), JSON.stringify(config));
-    let output = "";
-    const processGroup = process.platform !== "win32";
-    const child = spawn(
+    child = spawn(
       process.execPath,
       [
         join(root, "node_modules/wrangler/bin/wrangler.js"),
@@ -98,340 +163,179 @@ test(
         "--ip",
         "127.0.0.1",
         "--port",
-        "8791",
+        String(port),
         "--inspector-port",
-        "9291",
+        "9299",
         "--show-interactive-dev-session=false"
       ],
-      {
-        cwd: folder,
-        detached: processGroup,
-        env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
-        stdio: ["ignore", "pipe", "pipe"]
-      }
+      { cwd: folder, detached: processGroup, env: { ...process.env, WRANGLER_SEND_METRICS: "false" }, stdio: ["ignore", "pipe", "pipe"] }
     );
     child.stdout.on("data", (bytes) => (output += bytes));
     child.stderr.on("data", (bytes) => (output += bytes));
-    const peers = [];
-    async function http(path, { body, requestOrigin = origin } = {}) {
-      const response = await fetch(`${origin}/api/${path}`, {
-        method: body === undefined ? "GET" : "POST",
-        headers: {
-          Origin: requestOrigin,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(10000)
-      });
-      const text = await response.text();
-      let data;
+  }
+  const peers = [];
+  const connect = async (jar) => {
+    const peer = new Peer(jar);
+    peers.push(peer);
+    await peer.ready();
+    return peer;
+  };
+  try {
+    const probe = browser();
+    const deadline = Date.now() + 60000;
+    while (true) {
+      if (child && child.exitCode !== null) throw new Error(`Local Wrangler exited: ${output.slice(-3000)}`);
       try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error(
-          `/api/${path} returned non-JSON (${response.status}): ${text.slice(0, 500)}\n${output.slice(-2000)}`
-        );
-      }
-      return { response, data };
+        if ((await probe.http("config")).response.ok) break;
+      } catch {}
+      if (Date.now() > deadline) throw new Error(`Local Wrangler did not start: ${output.slice(-3000)}`);
+      await delay(200);
     }
-    async function peer(userId = "giorgi", requestOrigin = origin) {
-      const result = new Peer(userId, requestOrigin);
-      peers.push(result);
-      await result.ready();
-      return result;
-    }
-    try {
-      const deadline = Date.now() + 60000;
-      while (true) {
-        if (child.exitCode !== null)
-          throw new Error(`Local Wrangler exited: ${output.slice(-3000)}`);
-        try {
-          const result = await http("meta");
-          if (result.response.ok) break;
-        } catch {}
-        if (Date.now() > deadline)
-          throw new Error(
-            `Local Wrangler did not start: ${output.slice(-3000)}`
-          );
-        await delay(200);
-      }
-      await t.test(
-        "Shared notebook APIs open without passwords or setup codes",
-        async () => {
-          const meta = await http("meta");
-          assert.equal(meta.response.status, 200);
-          assert.deepEqual(
-            meta.data.users.map((user) => user.name),
-            ["გიო", "ვეკო", "შორენა", "ლიკა"]
-          );
-          assert.equal((await http("me?user=giorgi")).data.user.name, "გიო");
-          assert.equal((await http("me?user=unknown")).response.status, 400);
-          assert.equal((await http("history")).response.status, 200);
-          assert.equal((await http("export")).response.status, 200);
-          assert.equal(
-            (await http("setup", { body: { token: "anything" } })).response
-              .status,
-            404
-          );
-          assert.equal(
-            (await http("login", { body: { pin: "1234" } })).response.status,
-            404
-          );
-        }
-      );
-      const giorgi = await peer("giorgi"),
-        deda = await peer("deda");
-      let id, secondId;
-      await t.test(
-        "Typing is broadcast before Save; another editor cannot overwrite the active draft",
-        async () => {
-          await giorgi.request("edit.new", { date: "2027-06-09" });
-          const abandoned = (
-            await giorgi.next((m) => m.type === "editing")
-          ).draft;
-          assert.equal(abandoned.data.start_date, "2027-06-09");
-          assert.equal(abandoned.data.end_date, "2027-06-10");
-          await deda.next(
-            (m) => m.type === "draft" && m.draft.id === abandoned.id
-          );
-          await giorgi.request("edit.release");
-          const released = await deda.next(
-            (m) => m.type === "draft" && m.draft.id === abandoned.id
-          );
-          assert.equal(released.draft.leaseUntil, 0);
-          await giorgi.request("edit.new", { date: "2027-06-15" });
-          const newBooking = (
-            await giorgi.next((m) => m.type === "editing")
-          ).draft;
-          assert.notEqual(newBooking.id, abandoned.id);
-          assert.equal(newBooking.data.start_date, "2027-06-15");
-          assert.equal(newBooking.data.end_date, "2027-06-16");
-          id = newBooking.id;
-          await deda.next((m) => m.type === "draft" && m.draft.id === id);
-          await giorgi.request("edit.begin", { id: abandoned.id });
-          await giorgi.next(
-            (m) => m.type === "editing" && m.draft.id === abandoned.id
-          );
-          await giorgi.request("edit.discard", { id: abandoned.id });
-          await deda.next(
-            (m) => m.type === "discarded" && m.id === abandoned.id
-          );
-          await giorgi.request("edit.begin", { id });
-          await giorgi.next((m) => m.type === "editing" && m.draft.id === id);
-          await giorgi.request("edit.patch", {
-            id,
-            patch: {
-              guests: "8",
-              price: "450",
-              deposit: "100",
-              notes: "სტუმრები საღამოს მოვლენ.",
-              guest_name: "<script>not executable</script>"
-            }
-          });
-          const live = await deda.next(
-            (m) =>
-              m.type === "draft" &&
-              m.draft.id === id &&
-              m.draft.data.notes === "სტუმრები საღამოს მოვლენ."
-          );
-          assert.equal(live.draft.baseVersion, 0);
-          await assert.rejects(deda.request("edit.begin", { id }), {
-            code: "LOCKED"
-          });
-          await deda.request("sync");
-          const snapshot = await deda.next((m) => m.type === "snapshot");
-          assert.equal(snapshot.bookings.length, 0);
-          assert.equal(snapshot.drafts[0].data.guests, "8");
-          await giorgi.request("edit.save", { id });
-          const saved = await deda.next(
-            (m) => m.type === "saved" && m.booking.id === id
-          );
-          await giorgi.next((m) => m.type === "saved" && m.booking.id === id);
-          assert.equal(saved.booking.data.price, "450.00");
-          assert.equal(saved.booking.createdBy, "giorgi");
-          assert.equal(saved.booking.updatedBy, "giorgi");
-          await deda.request("edit.begin", { id });
-          await deda.next((m) => m.type === "editing" && m.draft.id === id);
-          await deda.request("edit.patch", {
-            id,
-            patch: { notes: "შორენამ განაახლა ჩანაწერი." }
-          });
-          await deda.request("edit.save", { id });
-          const updated = await giorgi.next(
-            (m) => m.type === "saved" && m.booking.id === id
-          );
-          assert.equal(updated.booking.createdBy, "giorgi");
-          assert.equal(updated.booking.updatedBy, "deda");
-          const history = (await http("history")).data.history.filter(
-            (item) => item.booking_id === id
-          );
-          assert.ok(
-            history.some(
-              (item) => item.action === "created" && item.user_id === "giorgi"
-            )
-          );
-          assert.ok(
-            history.some(
-              (item) => item.action === "updated" && item.user_id === "deda"
-            )
-          );
-        }
-      );
-      await t.test(
-        "Concurrent overlapping reservations are rejected; exact same-day turnover is allowed",
-        async () => {
-          await deda.request("edit.new", { date: "2027-06-16" });
-          secondId = (await deda.next((m) => m.type === "editing")).draft.id;
-          await deda.request("edit.patch", {
-            id: secondId,
-            patch: { guests: "4", price: "200", start_time: "11:00" }
-          });
-          await assert.rejects(deda.request("edit.save", { id: secondId }), {
-            code: "OVERLAP"
-          });
-          await deda.request("edit.patch", {
-            id: secondId,
-            patch: { start_time: "12:00" }
-          });
-          await deda.request("edit.save", { id: secondId });
-          await giorgi.next(
-            (m) => m.type === "saved" && m.booking.id === secondId
-          );
-        }
-      );
-      await t.test(
-        "Invalid money stays a draft; separate bookings can be edited concurrently",
-        async () => {
-          await giorgi.request("edit.begin", { id });
-          await deda.request("edit.begin", { id: secondId });
-          await giorgi.request("edit.patch", {
-            id,
-            patch: { deposit: "9999" }
-          });
-          await assert.rejects(giorgi.request("edit.save", { id }), {
-            code: "INVALID"
-          });
-          await giorgi.request("sync");
-          const current = await giorgi.next((m) => m.type === "snapshot");
-          assert.equal(
-            current.bookings.find((b) => b.id === id).data.deposit,
-            "100.00"
-          );
-          await giorgi.request("edit.discard", { id });
-          await deda.request("edit.discard", { id: secondId });
-        }
-      );
-      await t.test(
-        "Long Georgian drafts survive closing and can be resumed on a new connection",
-        async () => {
-          await giorgi.request("edit.begin", { id });
-          const notes = "ა".repeat(10000);
-          await giorgi.request("edit.patch", { id, patch: { notes } });
-          await deda.next(
-            (m) =>
-              m.type === "draft" &&
-              m.draft.id === id &&
-              m.draft.data.notes.length === 10000
-          );
-          await giorgi.request("edit.release");
-          const reconnected = await peer();
-          await reconnected.request("sync");
-          const current = await reconnected.next((m) => m.type === "snapshot");
-          assert.equal(
-            current.drafts.find((d) => d.id === id).data.notes,
-            notes
-          );
-          await reconnected.request("edit.begin", { id });
-          await reconnected.request("edit.save", { id });
-          await reconnected.close();
-        }
-      );
-      await t.test(
-        "Cancellation, history and restoration retain records and recheck conflicts",
-        async () => {
-          await deda.request("edit.begin", { id });
-          await deda.request("booking.cancel", { id });
-          assert.ok(
-            (await http("history")).data.history.some(
-              (h) => h.booking_id === id && h.action === "cancelled"
-            )
-          );
-          await giorgi.request("edit.new", { date: "2027-06-15" });
-          const replacement = (
-            await giorgi.next(
-              (m) =>
-                m.type === "editing" &&
-                m.draft.baseVersion === 0 &&
-                m.draft.id !== id
-            )
-          ).draft.id;
-          await giorgi.request("edit.patch", {
-            id: replacement,
-            patch: { guests: "2", price: "300" }
-          });
-          await giorgi.request("edit.save", { id: replacement });
-          await assert.rejects(deda.request("booking.restore", { id }), {
-            code: "OVERLAP"
-          });
-          await giorgi.request("edit.begin", { id: replacement });
-          await giorgi.request("booking.cancel", { id: replacement });
-          await deda.request("booking.restore", { id });
-          const backup = await http("export");
-          assert.equal(backup.response.status, 200);
-          assert.ok(
-            backup.data.bookings.some(
-              (b) => b.id === replacement && b.data.status === "cancelled"
-            )
-          );
-          const original = backup.data.bookings.find((b) => b.id === id);
-          assert.equal(original.createdBy, "giorgi");
-          assert.equal(original.updatedBy, "deda");
-          assert.equal(backup.data.format, "cottage-notebook-export-v1");
-        }
-      );
-      await t.test(
-        "Foreign-site WebSocket upgrades are refused",
-        async () => {
-          await new Promise((resolve, reject) => {
-            const socket = new WebSocket(
-              `${origin.replace("http:", "ws:")}/api/ws`,
-              {
-                headers: {
-                  Origin: "https://foreign.example"
-                }
-              }
-            );
-            socket.on("unexpected-response", (_, response) => {
-              try {
-                assert.equal(response.statusCode, 403);
-                response.resume();
-                socket.terminate();
-                resolve();
-              } catch (error) {
-                reject(error);
-              }
-            });
-            socket.on("open", () => {
-              socket.terminate();
-              reject(new Error("Foreign origin accepted"));
-            });
-            socket.on("error", () => {});
-          });
-        }
-      );
-    } finally {
-      for (const peer of peers) peer.ws.terminate();
+
+    const email = `family-${Date.now()}@example.com`;
+    const key = await passwordKey(email, "agaraki 2027!");
+    const phone = browser();
+    let gio, id, secondId;
+
+    await t.test("A new browser starts empty; its first booking creates its own notebook", async () => {
+      assert.deepEqual((await phone.http("session")).data, { authenticated: false });
+      assert.equal(await refused(phone.jar), 401);
+      const created = await phone.http("notebook", { body: {} });
+      assert.equal(created.response.status, 201);
+      assert.equal(created.data.account.guest, true);
+      const owner = await connect(phone.jar);
+      const draftId = await newBooking(owner, "2027-05-01", { guests: "2", price: "150" });
+      await owner.request("edit.save", { id: draftId });
+      const saved = await owner.next((m) => m.type === "saved");
+      assert.equal(saved.booking.createdBy, "");
+      await owner.close();
+      // Another browser sees nothing of it.
+      const stranger = browser();
+      await stranger.http("notebook", { body: {} });
+      const other = await connect(stranger.jar);
+      assert.equal((await other.request("sync").then(() => other.next((m) => m.type === "snapshot"))).bookings.length, 0);
+      await other.close();
+    });
+
+    await t.test("Signing up keeps the notebook; registered accounts ask each device for a name", async () => {
+      const signedUp = await phone.http("register", { body: { email, key } });
+      assert.equal(signedUp.response.status, 201);
+      assert.equal(signedUp.data.account.guest, false);
+      assert.equal(await refused(phone.jar), 409, "a name is needed first");
+      const named = await phone.http("members", { body: { name: "გიო", select: true } });
+      assert.equal(named.data.member.name, "გიო");
+      gio = await connect(phone.jar);
+      gio.messages.length = 0;
+      await gio.request("sync");
+      const snapshot = await gio.next((m) => m.type === "snapshot");
+      assert.equal(snapshot.bookings.length, 1, "the booking from before sign-up is still there");
+      assert.deepEqual(snapshot.presence.map((p) => p.name), ["გიო"]);
+    });
+
+    const laptop = browser();
+    let shorena;
+    await t.test("Typing is shared live; another person cannot overwrite an active draft", async () => {
+      assert.equal((await laptop.http("login", { body: { email, key: await passwordKey(email, "wrong") } })).response.status, 401);
+      const signedIn = await laptop.http("login", { body: { email, key } });
+      assert.equal(signedIn.response.status, 200);
+      assert.equal(signedIn.data.member, null);
+      await laptop.http("members", { body: { name: "შორენა", select: true } });
+      shorena = await connect(laptop.jar);
+      await gio.next((m) => m.type === "presence" && m.users.length === 2);
+
+      id = await newBooking(gio, "2027-06-15");
+      await shorena.next((m) => m.type === "draft" && m.draft.id === id && m.draft.ownerName === "გიო");
+      await gio.request("edit.patch", { id, patch: { guests: "8", price: "450", deposit: "100", notes: "სტუმრები საღამოს მოვლენ.", guest_name: "<script>x</script>" } });
+      await shorena.next((m) => m.type === "draft" && m.draft.id === id && m.draft.data.notes === "სტუმრები საღამოს მოვლენ.");
+      await assert.rejects(shorena.request("edit.begin", { id }), (error) => error.code === "LOCKED" && error.message.includes("გიო"));
+      await gio.request("edit.save", { id });
+      const saved = await shorena.next((m) => m.type === "saved" && m.booking.id === id);
+      assert.equal(saved.booking.data.price, "450.00");
+      assert.equal(saved.booking.createdBy, "გიო");
+      assert.equal(saved.by, "გიო");
+      await gio.next((m) => m.type === "saved" && m.booking.id === id);
+      await shorena.request("edit.begin", { id });
+      await shorena.next((m) => m.type === "editing" && m.draft.id === id);
+      await shorena.request("edit.patch", { id, patch: { notes: "შორენამ განაახლა." } });
+      await shorena.request("edit.save", { id });
+      const updated = await gio.next((m) => m.type === "saved" && m.booking.id === id);
+      assert.equal(updated.booking.createdBy, "გიო");
+      assert.equal(updated.booking.updatedBy, "შორენა");
+      const history = (await phone.http("history")).data.history.filter((item) => item.booking_id === id);
+      assert.ok(history.some((item) => item.action === "created" && item.actor === "გიო"));
+      assert.ok(history.some((item) => item.action === "updated" && item.actor === "შორენა"));
+    });
+
+    await t.test("Overlaps are refused; same-day turnover is allowed", async () => {
+      secondId = await newBooking(shorena, "2027-06-16", { guests: "4", price: "200", start_time: "11:00" });
+      await assert.rejects(shorena.request("edit.save", { id: secondId }), { code: "OVERLAP" });
+      await shorena.request("edit.patch", { id: secondId, patch: { start_time: "12:00" } });
+      await shorena.request("edit.save", { id: secondId });
+      await gio.next((m) => m.type === "saved" && m.booking.id === secondId);
+    });
+
+    await t.test("Cancel, history and restore keep records and recheck dates", async () => {
+      await shorena.request("edit.begin", { id });
+      await shorena.request("booking.cancel", { id });
+      assert.ok((await phone.http("history")).data.history.some((h) => h.booking_id === id && h.action === "cancelled" && h.actor === "შორენა"));
+      const replacement = await newBooking(gio, "2027-06-15", { guests: "2", price: "300" });
+      await gio.request("edit.save", { id: replacement });
+      await assert.rejects(shorena.request("booking.restore", { id }), { code: "OVERLAP" });
+      await gio.request("edit.begin", { id: replacement });
+      await gio.request("booking.cancel", { id: replacement });
+      await shorena.request("booking.restore", { id });
+      const backup = await laptop.http("export");
+      assert.equal(backup.response.status, 200);
+      assert.equal(backup.data.format, "cottage-notebook-export-v2");
+      const original = backup.data.bookings.find((b) => b.id === id);
+      assert.equal(original.createdBy, "გიო");
+      assert.equal(original.updatedBy, "შორენა");
+    });
+
+    await t.test("A browser notebook can be merged into the account after signing in", async () => {
+      const tablet = browser();
+      await tablet.http("notebook", { body: {} });
+      const guest = await connect(tablet.jar);
+      const keepId = await newBooking(guest, "2027-08-01", { guests: "3", price: "210" });
+      await guest.request("edit.save", { id: keepId });
+      const clashId = await newBooking(guest, "2027-06-15", { guests: "3", price: "210" });
+      await guest.request("edit.save", { id: clashId });
+      await guest.close();
+      const signedIn = await tablet.http("login", { body: { email, key } });
+      assert.equal(signedIn.data.guestBookings, 2);
+      await tablet.http("members", { body: { name: "ლიკა", select: true } });
+      const merged = await tablet.http("account/merge", { body: { keep: true } });
+      assert.deepEqual(merged.data, { imported: 1, skipped: 1 }, "the clashing booking is not imported");
+      assert.equal((await tablet.http("session")).data.guestBookings, 0);
+      const added = await gio.next((m) => m.type === "snapshot" && m.bookings.some((b) => b.id === keepId));
+      assert.equal(added.bookings.find((b) => b.id === keepId).createdBy, "ლიკა");
+    });
+
+    await t.test("Names, passwords and signing out other devices", async () => {
+      const removed = await laptop.http(`members/${(await laptop.http("session")).data.member.id}`, { method: "DELETE" });
+      assert.equal(removed.data.member, null);
+      assert.equal(await refused(laptop.jar), 409);
+      const newKey = await passwordKey(email, "new secret 2028");
+      assert.equal((await phone.http("account/password", { body: { key: newKey } })).response.status, 200);
+      const out = await phone.http("account/sign-out-others", { body: {} });
+      assert.ok(out.data.signedOut >= 2);
+      assert.equal((await laptop.http("session")).data.authenticated, false);
+      assert.equal((await browser().http("login", { body: { email, key: newKey } })).response.status, 200);
+    });
+
+    await t.test("Foreign-site requests are refused", async () => {
+      assert.equal(await refused(phone.jar, "https://foreign.example"), 403);
+      assert.equal((await phone.http("members", { body: { name: "x" }, requestOrigin: "https://foreign.example" })).response.status, 403);
+    });
+  } finally {
+    for (const peer of peers) peer.ws.terminate();
+    if (child) {
       try {
         if (processGroup) process.kill(-child.pid, "SIGTERM");
         else child.kill("SIGTERM");
       } catch {}
       await Promise.race([once(child, "exit"), delay(3000)]);
-      await rm(folder, {
-        recursive: true,
-        force: true,
-        maxRetries: 10,
-        retryDelay: 250
-      });
     }
+    if (folder) await rm(folder, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
   }
-);
+});

@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Shared Georgian cottage booking notebook for Cloudflare Workers",
+  "description": "Georgian cottage booking notebook with accounts, for Cloudflare Workers and Pages",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "check": "node --check src/worker.js && node --check public/app.js && node --check public/sw.js && node --test tests/domain.test.js",
-    "test:integration": "node --test tests/integration.test.js"
+    "deploy": "node scripts/deploy.mjs",
+    "check": "node --check src/worker.js && node --check src/accounts.js && node --check src/notebook.js && node --check src/auth.js && node --check public/app.js && node --check public/password.js && node --check public/sw.js && node --check pages-site/_worker.js && node --check scripts/deploy.mjs && node --test tests/domain.test.js",
+    "test:integration": "node --test tests/integration.test.js",
+    "deploy:ci": "wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "4.148.0",

@@ -1,18 +1,30 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "agarakis-rveuli",
+  // The live Worker: it serves the site, the notebooks and live sync. The
+  // javshnebi.pages.dev front door forwards every request here. PUBLIC_URL is
+  // stored as a secret by scripts/deploy.mjs once that front door exists, and
+  // from then on the old workers.dev address redirects to it.
+  "name": "cotage-notepad",
   "main": "src/worker.js",
   "compatibility_date": "2025-06-01",
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": true
   },
   "durable_objects": {
-    "bindings": [{ "name": "NOTEBOOK", "class_name": "FamilyNotebook" }]
+    "bindings": [
+      { "name": "NOTEBOOK", "class_name": "FamilyNotebook" },
+      { "name": "ACCOUNTS", "class_name": "AccountsStore" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FamilyNotebook"] }],
-  "vars": { "APP_NAME": "აგარაკის ჯავშნები" },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["FamilyNotebook"] },
+    { "tag": "v2", "new_sqlite_classes": ["AccountsStore"] }
+  ],
+  "vars": {
+    "APP_NAME": "აგარაკის ჯავშნები"
+  },
   "observability": { "enabled": false }
 }

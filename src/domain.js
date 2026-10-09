@@ -1,9 +1,3 @@
-export const MEMBERS = [
-  { id: "giorgi", name: "გიო", role: "admin" },
-  { id: "veko", name: "ვეკო", role: "member" },
-  { id: "deda", name: "შორენა", role: "member" },
-  { id: "lika", name: "ლიკა", role: "member" }
-];
 export const FIELDS = [
   "start_date",
   "end_date",

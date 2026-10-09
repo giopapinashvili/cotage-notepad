@@ -4,6 +4,9 @@
   X-Frame-Options: DENY
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 
+/
+  Cache-Control: no-cache
+
 /sw.js
   Cache-Control: no-cache
 

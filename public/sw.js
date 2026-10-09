@@ -1,9 +1,10 @@
-const CACHE = "cottage-shell-v5";
+const CACHE = "cottage-shell-v6";
 const SHELL = [
   "/",
   "/index.html",
   "/styles.css",
   "/app.js",
+  "/password.js",
   "/manifest.webmanifest",
   "/icons/favicon.svg",
   "/icons/icon-192.png",
@@ -52,7 +53,8 @@ self.addEventListener("fetch", (event) => {
   if (
     event.request.method !== "GET" ||
     url.origin !== self.location.origin ||
-    url.pathname.startsWith("/api/")
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/auth/")
   )
     return;
   if (event.request.mode === "navigate") {

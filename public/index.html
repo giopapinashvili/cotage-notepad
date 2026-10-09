@@ -9,7 +9,7 @@
     <meta name="theme-color" content="#293A2C" />
     <meta
       name="description"
-      content="ოჯახის საერთო რვეული აგარაკის ჯავშნებისთვის"
+      content="უფასო რვეული აგარაკის ან სასტუმრო სახლის ჯავშნებისთვის: თავისუფალი დღეები, ფასი, ავანსი და ოჯახთან ერთად ცოცხალი რედაქტირება."
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -19,6 +19,7 @@
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/password.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -29,52 +30,39 @@
         <p id="loading-message">რვეული იხსნება…</p>
         <button id="loading-retry" class="button" hidden>ხელახლა ცდა</button>
       </section>
-      <section id="access-screen" class="welcome" hidden>
-        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
-        <h1>აგარაკის ჯავშნები</h1>
-        <p>საიტის გასახსნელად შეიყვანე პაროლი</p>
-        <form id="access-form" class="access-form">
-          <label for="access-code">პაროლი</label>
-          <input
-            id="access-code"
-            name="access-code"
-            type="password"
-            inputmode="numeric"
-            autocomplete="current-password"
-            maxlength="8"
-            required
-          />
-          <p id="access-error" class="error" role="alert" hidden></p>
-          <button class="button primary full" type="submit">გახსნა</button>
-        </form>
-      </section>
-      <section id="choose-user-screen" class="welcome" hidden>
-        <img class="brand-icon" src="/icons/icon-192.png" alt="" />
-        <h1 data-app-name>აგარაკის ჯავშნები</h1>
-        <p>აირჩიე შენი სახელი</p>
-        <p id="choose-user-error" class="error" role="alert" hidden></p>
-        <div id="account-options" class="account-options"></div>
-      </section>
       <section id="app-screen" hidden>
         <header class="app-header">
           <div class="brand-row">
             <img src="/icons/icon-192.png" class="header-icon" alt="" />
             <div>
               <h1 data-app-name>აგარაკის ჯავშნები</h1>
-              <p>ჩვენი საერთო რვეული</p>
+              <p id="app-subtitle">შენი ჯავშნების რვეული</p>
             </div>
+            <button id="account-button" class="account-avatar" type="button" aria-label="ექაუნთი" title="ექაუნთი" hidden></button>
           </div>
-          <div class="family-row">
+          <div id="family-row" class="family-row" hidden>
             <div class="current-account">
-              <div id="members" class="members" aria-label="არჩეული ანგარიში"></div>
-              <button id="switch-account" class="text-button" type="button">
-                სახელის შეცვლა
+              <button id="member-chip" class="member-chip" type="button" aria-label="ვინ წერს — შეცვლა">
+                <span id="member-chip-name">აირჩიე სახელი</span>
               </button>
+              <div id="members" class="members" aria-label="ახლა ხაზზე არიან"></div>
             </div>
-            <div id="connection-status" class="connection" role="status">
-              დაკავშირება…
-            </div>
+            <div id="connection-status" class="connection" role="status"></div>
           </div>
+          <section id="guest-card" class="guest-card" aria-labelledby="guest-title" hidden>
+            <span class="guest-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.2 9.1 4.5 4.5 0 0 0 7 18Z" /><path d="m9.5 13.5 2 2 3.5-3.5" /></svg>
+            </span>
+            <div class="guest-copy">
+              <h2 id="guest-title">შეინახე ჯავშნები ექაუნთში</h2>
+              <p>ახლა მხოლოდ ამ ბრაუზერშია. ექაუნთით ოჯახთან ერთად და ნებისმიერი ტელეფონიდან გამოიყენებ.</p>
+            </div>
+            <div class="guest-actions">
+              <a class="button google-button" href="/auth/google" data-google hidden>Google-ით გაგრძელება</a>
+              <button class="button primary" type="button" data-auth="register">რეგისტრაცია</button>
+              <button class="button" type="button" data-auth="login">შესვლა</button>
+            </div>
+          </section>
           <div class="month-row">
             <button
               id="previous-month"
@@ -117,7 +105,7 @@
         </div>
         <section id="booking-list" aria-label="თარიღები და ჯავშნები"></section>
         <footer class="app-footer">
-          <span>საერთო რვეული</span>
+          <span>ყველა ჯავშანი ერთ ადგილას</span>
         </footer>
         <div class="bottom-action">
           <button
@@ -328,6 +316,97 @@
         ><button id="confirm-no" class="button" type="button">უკან</button>
       </div>
     </dialog>
+    <dialog id="auth-dialog" class="sheet auth-sheet" aria-labelledby="auth-title" aria-describedby="auth-lead" closedby="any">
+      <div class="dialog-heading">
+        <div>
+          <h2 id="auth-title">ექაუნთის შექმნა</h2>
+          <p id="auth-lead" class="eyebrow">რაც უკვე ჩაწერე, ექაუნთში დარჩება.</p>
+        </div>
+        <button class="icon-button" type="button" data-close="auth-dialog" aria-label="დახურვა">×</button>
+      </div>
+      <div class="auth-tabs" role="group" aria-label="რეგისტრაცია ან შესვლა">
+        <button type="button" id="tab-register" data-auth-tab="register" aria-selected="true">რეგისტრაცია</button>
+        <button type="button" id="tab-login" data-auth-tab="login" aria-selected="false">შესვლა</button>
+      </div>
+      <a class="button full google-button" href="/auth/google" data-google hidden>Google-ით გაგრძელება</a>
+      <p class="auth-divider" data-google hidden><span>ან ელფოსტით</span></p>
+      <form id="register-form" class="auth-form" novalidate>
+        <label for="register-email">ელფოსტა
+          <input id="register-email" name="email" type="email" autocomplete="username" spellcheck="false" enterkeyhint="next" maxlength="254" required />
+        </label>
+        <label for="new-password">პაროლი <span class="hint">· მინიმუმ 8 სიმბოლო</span>
+          <span class="password-field">
+            <input id="new-password" name="new-password" type="password" autocomplete="new-password" minlength="8" maxlength="200" enterkeyhint="done" required />
+            <button type="button" class="reveal" aria-label="პაროლის ჩვენება" aria-pressed="false">ნახვა</button>
+          </span>
+        </label>
+        <p id="register-error" class="error" role="alert" hidden></p>
+        <button class="button primary full" type="submit">ექაუნთის შექმნა</button>
+        <p class="footnote auth-fine">ერთ ექაუნთში მთელ ოჯახს შეუძლია მუშაობა. შესვლის შემდეგ თითოეული თავის სახელს აირჩევს.</p>
+      </form>
+      <form id="login-form" class="auth-form" novalidate hidden>
+        <label for="login-email">ელფოსტა
+          <input id="login-email" name="email" type="email" autocomplete="username" spellcheck="false" enterkeyhint="next" maxlength="254" required />
+        </label>
+        <label for="current-password">პაროლი
+          <span class="password-field">
+            <input id="current-password" name="current-password" type="password" autocomplete="current-password" maxlength="200" enterkeyhint="done" required />
+            <button type="button" class="reveal" aria-label="პაროლის ჩვენება" aria-pressed="false">ნახვა</button>
+          </span>
+        </label>
+        <button type="button" class="text-button forgot-link" id="forgot-button">დაგავიწყდა პაროლი?</button>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button class="button primary full" type="submit">შესვლა</button>
+      </form>
+    </dialog>
+
+    <dialog id="forgot-dialog" class="sheet" aria-labelledby="forgot-title" closedby="any">
+      <div class="dialog-heading">
+        <h2 id="forgot-title">პაროლი დაგავიწყდა?</h2>
+        <button class="icon-button" type="button" data-close="forgot-dialog" aria-label="დახურვა">×</button>
+      </div>
+      <p class="muted">ელფოსტით აღდგენა ჯერ არ არის. ახალ პაროლს ასე დააყენებ:</p>
+      <ul class="help-list">
+        <li>თუ სადმე უკვე შესული ხარ, მაგალითად ტელეფონზე, გახსენი <strong>ექაუნთი</strong> და დააყენე ახალი პაროლი.</li>
+        <li>თუ ექაუნთი Google-თან არის დაკავშირებული, შედი Google-ით და იქ დააყენე ახალი პაროლი.</li>
+        <li>ოჯახის წევრსაც, ვინც უკვე შესულია, შეუძლია ახალი პაროლის დაყენება.</li>
+      </ul>
+      <button class="button primary full" type="button" data-auth="login">შესვლაზე დაბრუნება</button>
+    </dialog>
+
+    <dialog id="member-dialog" class="sheet member-sheet" aria-labelledby="member-title" aria-describedby="member-copy">
+      <h2 id="member-title">ვინ ხარ?</h2>
+      <p id="member-copy" class="muted"></p>
+      <div id="member-options" class="member-options"></div>
+      <form id="member-form" class="member-form">
+        <label id="member-add-label" for="member-name">შენი სახელი</label>
+        <div class="inline-form">
+          <input id="member-name" name="member-name" maxlength="40" autocomplete="given-name" placeholder="მაგ. ნინო" enterkeyhint="done" required />
+          <button class="button primary" type="submit">დამატება</button>
+        </div>
+        <p id="member-error" class="error" role="alert" hidden></p>
+      </form>
+      <button id="member-cancel" class="text-button" type="button" data-close="member-dialog" hidden>გაუქმება</button>
+    </dialog>
+
+    <dialog id="merge-dialog" class="sheet member-sheet" aria-labelledby="merge-title" aria-describedby="merge-copy">
+      <h2 id="merge-title">გადმოვიტანოთ ამ ბრაუზერის ჯავშნები?</h2>
+      <p id="merge-copy" class="muted"></p>
+      <p id="merge-error" class="error" role="alert" hidden></p>
+      <div class="merge-actions">
+        <button id="merge-keep" class="button primary full" type="button">გადმოტანა ექაუნთში</button>
+        <button id="merge-drop" class="text-button danger" type="button">არ მინდა, წაიშალოს</button>
+      </div>
+    </dialog>
+
+    <dialog id="account-dialog" class="sheet" aria-labelledby="account-title" closedby="any">
+      <div class="dialog-heading">
+        <h2 id="account-title">ექაუნთი</h2>
+        <button class="icon-button" type="button" data-close="account-dialog" aria-label="დახურვა">×</button>
+      </div>
+      <div id="account-content"></div>
+    </dialog>
+
     <div id="toast" class="toast" role="status" hidden></div>
     <noscript>რვეულის გამოსაყენებლად ბრაუზერში JavaScript ჩართე.</noscript>
   </body>

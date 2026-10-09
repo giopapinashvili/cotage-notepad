@@ -1,651 +1,289 @@
-import { DurableObject } from "cloudflare:workers";
 import {
-  MEMBERS,
-  AppError,
-  checkedPatch,
-  newDraft,
-  validateBooking,
-  validDate
-} from "./domain.js";
-import { checkOrigin, json } from "./security.js";
+  UserError,
+  clearOauthCookie,
+  clearSessionCookie,
+  finishGoogle,
+  googleReady,
+  hashPasswordKey,
+  json,
+  normalizeEmail,
+  normalizeMemberName,
+  publicRedirect,
+  randomToken,
+  readJson,
+  readSessionToken,
+  redirect,
+  sameOrigin,
+  sessionCookie,
+  sha256Hex,
+  startGoogle,
+  validPasswordKey,
+  verifyPasswordKey
+} from "./auth.js";
 
-const LEASE_MS = 65000;
-const MAX_BOOKINGS = 10000;
-const SCHEMA = [
-  `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`,
-  `CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL, starts_at INTEGER NOT NULL, ends_at INTEGER NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, created_at INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS idx_bookings_active_interval ON bookings(starts_at, ends_at) WHERE status != 'cancelled'`,
-  `CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY, data TEXT NOT NULL, base_version INTEGER NOT NULL, revision INTEGER NOT NULL, owner_id TEXT NOT NULL, connection_id TEXT, lease_until INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, booking_id TEXT NOT NULL, action TEXT NOT NULL, user_id TEXT NOT NULL, at INTEGER NOT NULL, before_data TEXT, after_data TEXT)`,
-  `CREATE INDEX IF NOT EXISTS idx_history_at ON history(at DESC)`
-];
+export { FamilyNotebook } from "./notebook.js";
+export { AccountsStore } from "./accounts.js";
+
+const LOGIN_WINDOW = 15 * 60000;
+const appName = (env) => env.APP_NAME || "აგარაკის ჯავშნები";
+const error = (message, status = 400, code = undefined) => json(code ? { error: message, code } : { error: message }, status);
+const accounts = (env) => env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts-v1"));
+const notebook = (env, accountId) => env.NOTEBOOK.get(env.NOTEBOOK.idFromName("notebook:" + accountId));
+const clientIp = (request) => request.headers.get("CF-Connecting-IP") || "local";
+const keyHash = (key) => sha256Hex("attempt:" + key);
+const isUUID = (value) => typeof value === "string" && /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i.test(value);
+
+function withCookies(response, ...cookies) {
+  for (const cookie of cookies) if (cookie) response.headers.append("Set-Cookie", cookie);
+  return response;
+}
+
+function passwordKeyFrom(input) {
+  if (!validPasswordKey(input.key)) throw new UserError("პაროლი ვერ დამუშავდა. განაახლე გვერდი და სცადე ხელახლა.");
+  return input.key;
+}
+
+async function newToken() {
+  const token = randomToken(32);
+  return { token, tokenHash: await sha256Hex(token) };
+}
+
+async function currentSession(env, request) {
+  const token = readSessionToken(request);
+  if (!token) return null;
+  const tokenHash = await sha256Hex(token);
+  const session = await accounts(env).session(tokenHash);
+  return session ? { ...session, token, tokenHash } : null;
+}
+
+async function payload(env, session) {
+  let guestBookings = 0;
+  if (session.mergeFrom) {
+    try {
+      guestBookings = await notebook(env, session.mergeFrom).countBookings();
+    } catch {}
+  }
+  return {
+    authenticated: true,
+    account: { email: session.email, guest: session.guest, hasPassword: session.hasPassword, hasGoogle: session.hasGoogle },
+    members: session.members,
+    member: session.member,
+    guestBookings
+  };
+}
+
+async function freshPayload(env, tokenHash, token) {
+  const session = await accounts(env).session(tokenHash);
+  return payload(env, { ...session, token, tokenHash });
+}
+
+// Who is writing: registered accounts are shared, so each device picks a name.
+// A browser notebook belongs to one browser and needs no name.
+function actorOf(session) {
+  if (session.guest) return { id: "owner", name: "" };
+  if (!session.member) throw new UserError("ჯერ აირჩიე, ვინ ხარ.", 409, "member-required");
+  return { id: session.member.id, name: session.member.name };
+}
+
+async function guestHasData(env, session) {
+  if (!session?.guest) return false;
+  try {
+    return (await notebook(env, session.accountId).countBookings()) > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function wipeNotebook(env, accountId) {
+  if (!accountId) return;
+  try {
+    await notebook(env, accountId).wipe();
+  } catch (err) {
+    console.error("Could not clear notebook", err?.message);
+  }
+}
+
+async function forwardToNotebook(request, env, session, needsActor = true) {
+  const actor = needsActor ? actorOf(session) : { id: "", name: "" };
+  const headers = new Headers(request.headers);
+  headers.set("X-Actor-Id", actor.id);
+  headers.set("X-Actor-Name", encodeURIComponent(actor.name));
+  return notebook(env, session.accountId).fetch(new Request(request, { headers }));
+}
+
+async function handleApi(request, env) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const method = request.method;
+  if (!sameOrigin(request)) return error("მოთხოვნის წყარო დაუშვებელია.", 403, "ORIGIN");
+  const store = accounts(env);
+
+  if (path === "/api/config" && method === "GET") return json({ googleReady: googleReady(env), appName: appName(env) });
+
+  if (path === "/api/register" && method === "POST") {
+    const input = await readJson(request);
+    const email = normalizeEmail(input.email);
+    const passwordHash = await hashPasswordKey(passwordKeyFrom(input));
+    const next = await newToken();
+    const current = readSessionToken(request);
+    const result = await store.register({
+      email,
+      passwordHash,
+      ipKeyHash: await keyHash("register:" + clientIp(request)),
+      currentTokenHash: current ? await sha256Hex(current) : null,
+      newTokenHash: next.tokenHash
+    });
+    if (!result.ok) return error(result.error, result.status, result.code);
+    return withCookies(json(await freshPayload(env, next.tokenHash, next.token), 201), sessionCookie(request, next.token));
+  }
+
+  if (path === "/api/login" && method === "POST") {
+    const input = await readJson(request);
+    const email = normalizeEmail(input.email);
+    const key = passwordKeyFrom(input);
+    const ip = clientIp(request);
+    const keys = { pairKeyHash: await keyHash(`login:${ip}:${email}`), wideKeyHash: await keyHash(`login-ip:${ip}`), window: LOGIN_WINDOW };
+    const start = await store.loginStart({ email, ...keys });
+    if (!start.ok) return error(start.error, start.status, start.code);
+    if (!start.account?.password_hash || !(await verifyPasswordKey(key, start.account.password_hash))) {
+      await store.loginFailed(keys);
+      if (start.account && !start.account.password_hash) return error("ამ ელფოსტით Google-ით ხარ რეგისტრირებული. დააჭირე „Google-ით შესვლას“.", 401, "google-only");
+      return error("ელფოსტა ან პაროლი არასწორია.", 401, "wrong-password");
+    }
+    const current = await currentSession(env, request);
+    const next = await newToken();
+    const result = await store.signIn({
+      accountId: start.account.id,
+      pairKeyHash: keys.pairKeyHash,
+      currentTokenHash: current?.tokenHash || null,
+      newTokenHash: next.tokenHash,
+      guestHasData: await guestHasData(env, current)
+    });
+    await wipeNotebook(env, result.removedGuest);
+    return withCookies(json(await freshPayload(env, next.tokenHash, next.token)), sessionCookie(request, next.token));
+  }
+
+  if (path === "/api/logout" && method === "POST") {
+    const token = readSessionToken(request);
+    if (token) await store.deleteSession(await sha256Hex(token));
+    return json({ ok: true }, 200, { "Set-Cookie": clearSessionCookie(request) });
+  }
+
+  const session = await currentSession(env, request);
+
+  if (path === "/api/session" && method === "GET") {
+    if (!session) return json({ authenticated: false }, 200, readSessionToken(request) ? { "Set-Cookie": clearSessionCookie(request) } : {});
+    return json(await payload(env, session), 200, session.renewed ? { "Set-Cookie": sessionCookie(request, session.token) } : {});
+  }
+
+  // The first booking in a browser creates that browser's own notebook.
+  if (path === "/api/notebook" && method === "POST") {
+    if (session) return json(await payload(env, session));
+    const next = await newToken();
+    const result = await store.createBrowserNotebook(await keyHash("notebook:" + clientIp(request)), next.tokenHash);
+    if (!result.ok) return error(result.error, result.status, result.code);
+    return withCookies(json(await freshPayload(env, next.tokenHash, next.token), 201), sessionCookie(request, next.token));
+  }
+
+  if (!session) return error("რვეული ვერ მოიძებნა. განაახლე გვერდი.", 401, "signed-out");
+
+  if (path === "/api/ws" && method === "GET") return forwardToNotebook(request, env, session);
+  if ((path === "/api/history" || path === "/api/export") && method === "GET") return forwardToNotebook(request, env, session, false);
+
+  if (path === "/api/members" && method === "POST") {
+    if (session.guest) return error("სახელები რეგისტრაციის შემდეგ ემატება.", 400);
+    const input = await readJson(request);
+    const result = await store.addMember(session.accountId, session.tokenHash, normalizeMemberName(input.name), input.select === true);
+    if (!result.ok) return error(result.error, result.status);
+    return json({ ...(await freshPayload(env, session.tokenHash, session.token)), added: result.member }, 201);
+  }
+  const memberMatch = path.match(/^\/api\/members\/([^/]+)$/);
+  if (memberMatch && method === "DELETE") {
+    if (!isUUID(memberMatch[1])) return error("სახელი ვერ მოიძებნა.", 404);
+    await store.removeMember(session.accountId, memberMatch[1]);
+    return json(await freshPayload(env, session.tokenHash, session.token));
+  }
+  if (path === "/api/session/member" && method === "PUT") {
+    const input = await readJson(request);
+    if (!isUUID(input.memberId)) return error("სახელი ვერ მოიძებნა.", 404);
+    const result = await store.selectMember(session.accountId, session.tokenHash, input.memberId);
+    if (!result.ok) return error(result.error, result.status);
+    return json(await freshPayload(env, session.tokenHash, session.token));
+  }
+  if (path === "/api/account/password" && method === "POST") {
+    if (session.guest) return error("პაროლის დასაყენებლად ჯერ დარეგისტრირდი.", 400);
+    const passwordHash = await hashPasswordKey(passwordKeyFrom(await readJson(request)));
+    await store.setPassword(session.accountId, passwordHash);
+    return json(await freshPayload(env, session.tokenHash, session.token));
+  }
+  if (path === "/api/account/sign-out-others" && method === "POST") {
+    return json({ ok: true, signedOut: await store.signOutOthers(session.accountId, session.tokenHash) });
+  }
+  if (path === "/api/account/merge" && method === "POST") {
+    const keep = (await readJson(request)).keep === true;
+    const guestId = session.mergeFrom;
+    if (!guestId) return json({ imported: 0, skipped: 0 });
+    let result = { imported: 0, skipped: 0 };
+    if (keep) {
+      const actor = actorOf(session);
+      const bookings = await notebook(env, guestId).exportBookings();
+      result = await notebook(env, session.accountId).importBookings(bookings, actor.name);
+    }
+    await store.finishMerge(session.tokenHash, guestId);
+    await wipeNotebook(env, guestId);
+    return json(result);
+  }
+  return error("მისამართი ვერ მოიძებნა.", 404, "NOT_FOUND");
+}
+
+async function handleAuth(request, env) {
+  const url = new URL(request.url);
+  if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+  if (url.pathname === "/auth/google") {
+    if (!googleReady(env)) return redirect("/?auth=google-off");
+    return startGoogle(request, env, url.searchParams.get("mode") === "link" ? "link" : "login");
+  }
+  if (url.pathname !== "/auth/google/callback") return new Response("Not found", { status: 404 });
+  const clear = clearOauthCookie(request);
+  if (!googleReady(env)) return redirect("/?auth=google-off", { "Set-Cookie": clear });
+  const result = await finishGoogle(request, env);
+  if (result.error) return redirect("/?auth=" + result.error, { "Set-Cookie": clear });
+  const current = await currentSession(env, request);
+  const next = await newToken();
+  const outcome = await accounts(env).googleSignIn({
+    sub: result.profile.sub,
+    email: result.profile.email,
+    mode: result.mode,
+    currentTokenHash: current?.tokenHash || null,
+    newTokenHash: next.tokenHash,
+    guestHasData: await guestHasData(env, current)
+  });
+  if (!outcome.ok) return redirect("/?auth=" + outcome.code, { "Set-Cookie": clear });
+  if (outcome.linked) return redirect("/?auth=google-linked", { "Set-Cookie": clear });
+  await wipeNotebook(env, outcome.removedGuest);
+  return withCookies(new Response(null, { status: 302, headers: { Location: "/", "Cache-Control": "no-store" } }), clear, sessionCookie(request, next.token));
+}
 
 export default {
   async fetch(request, env) {
+    const moved = publicRedirect(request, env);
+    if (moved) return moved;
     const url = new URL(request.url);
-    if (
-      url.protocol !== "https:" &&
-      !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
-    ) {
-      if (request.method !== "GET" || url.pathname.startsWith("/api/"))
-        return json(
-          { error: "საჭიროა დაცული HTTPS კავშირი.", code: "HTTPS_REQUIRED" },
-          400
-        );
+    if (url.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+      if (request.method !== "GET" || url.pathname.startsWith("/api/")) return error("საჭიროა დაცული HTTPS კავშირი.", 400, "HTTPS_REQUIRED");
       url.protocol = "https:";
       return Response.redirect(url.toString(), 308);
     }
-    if (url.pathname.startsWith("/api/"))
-      return env.NOTEBOOK.get(
-        env.NOTEBOOK.idFromName("family-notebook-v1")
-      ).fetch(request);
-    return env.ASSETS.fetch(request);
+    const api = url.pathname.startsWith("/api/");
+    const auth = url.pathname.startsWith("/auth/");
+    if (!api && !auth) return env.ASSETS.fetch(request);
+    try {
+      return api ? await handleApi(request, env) : await handleAuth(request, env);
+    } catch (err) {
+      if (err instanceof UserError) return error(err.message, err.status, err.code);
+      console.error("Request failed", err?.name, err?.message);
+      if (auth) return redirect("/?auth=google-failed", { "Set-Cookie": clearOauthCookie(request) });
+      return error("სერვერზე შეცდომაა. ჩანაწერი არ წაშლილა; სცადე ხელახლა.", 500, "SERVER_ERROR");
+    }
   }
 };
-
-export class FamilyNotebook extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.ctx = ctx;
-    this.env = env;
-    this.sql = ctx.storage.sql;
-    // Durable Object schema is private to this one room; idempotent initial migration.
-    ctx.storage.transactionSync(() => {
-      for (const statement of SCHEMA) this.sql.exec(statement);
-      const version =
-        this.one("SELECT MAX(version) AS version FROM schema_version")?.version ||
-        0;
-      if (version < 2) {
-        this.sql.exec("DROP TABLE IF EXISTS sessions");
-        this.sql.exec("DROP TABLE IF EXISTS throttles");
-        this.sql.exec("DROP TABLE IF EXISTS users");
-        this.sql.exec("INSERT OR IGNORE INTO schema_version(version) VALUES (2)");
-      }
-      const bookingColumns = this.all("PRAGMA table_info(bookings)");
-      if (!bookingColumns.some((column) => column.name === "created_by")) {
-        this.sql.exec(
-          "ALTER TABLE bookings ADD COLUMN created_by TEXT NOT NULL DEFAULT 'family'"
-        );
-      }
-      this.sql.exec("INSERT OR IGNORE INTO schema_version(version) VALUES (3)");
-    });
-    ctx.setWebSocketAutoResponse(
-      new WebSocketRequestResponsePair("ping", "pong")
-    );
-  }
-  one(query, ...args) {
-    return this.sql.exec(query, ...args).toArray()[0] || null;
-  }
-  all(query, ...args) {
-    return this.sql.exec(query, ...args).toArray();
-  }
-  users() {
-    return MEMBERS;
-  }
-  userById(id) {
-    const user = MEMBERS.find((member) => member.id === id);
-    if (!user) throw new AppError("აირჩიე ოჯახის წევრი.", "USER_REQUIRED", 400);
-    return user;
-  }
-  async fetch(request) {
-    try {
-      const path = new URL(request.url).pathname;
-      if (request.method === "GET" && path === "/api/meta")
-        return json({
-          users: this.users(),
-          appName: this.env.APP_NAME || "აგარაკის ჯავშნები"
-        });
-      if (request.method === "GET" && path === "/api/me")
-        return json({
-          user: this.userById(new URL(request.url).searchParams.get("user")),
-          appName: this.env.APP_NAME || "აგარაკის ჯავშნები"
-        });
-      if (request.method === "GET" && path === "/api/ws")
-        return this.connect(request);
-      if (request.method === "GET" && path === "/api/history")
-        return json({
-          history: this.all(
-            "SELECT id, booking_id, action, user_id, at, before_data, after_data FROM history ORDER BY id DESC LIMIT 200"
-          ).map((row) => ({
-            ...row,
-            before: row.before_data ? JSON.parse(row.before_data) : null,
-            after: row.after_data ? JSON.parse(row.after_data) : null,
-            before_data: undefined,
-            after_data: undefined
-          }))
-        });
-      if (request.method === "GET" && path === "/api/export") {
-        return json(
-          {
-            format: "cottage-notebook-export-v1",
-            exportedAt: new Date().toISOString(),
-            bookings: this.all("SELECT * FROM bookings ORDER BY starts_at").map(
-              (row) => this.bookingView(row)
-            ),
-            drafts: this.drafts(),
-            history: this.all("SELECT * FROM history ORDER BY id")
-          },
-          200,
-          {
-            "Content-Disposition":
-              'attachment; filename="cottage-bookings-backup.json"'
-          }
-        );
-      }
-      throw new AppError("მისამართი ვერ მოიძებნა.", "NOT_FOUND", 404);
-    } catch (error) {
-      return this.errorResponse(error);
-    }
-  }
-  errorResponse(error) {
-    if (!(error instanceof AppError))
-      console.error("Notebook request failed:", error?.stack || error);
-    return json(
-      {
-        error:
-          error instanceof AppError
-            ? error.message
-            : "სერვერზე შეცდომაა. ჩანაწერი არ წაშლილა; სცადე ხელახლა.",
-        code: error.code || "SERVER_ERROR"
-      },
-      error.status || 500
-    );
-  }
-  bookings() {
-    return this.all(
-      "SELECT * FROM bookings WHERE status != 'cancelled' ORDER BY starts_at"
-    ).map((row) => this.bookingView(row));
-  }
-  bookingView(row) {
-    return {
-      id: row.id,
-      data: JSON.parse(row.data),
-      version: row.version,
-      updatedAt: row.updated_at,
-      updatedBy: row.updated_by,
-      createdAt: row.created_at,
-      createdBy: row.created_by
-    };
-  }
-  drafts() {
-    return this.all("SELECT * FROM drafts ORDER BY updated_at").map((row) =>
-      this.draftView(row)
-    );
-  }
-  draftView(row) {
-    return {
-      id: row.id,
-      data: JSON.parse(row.data),
-      baseVersion: row.base_version,
-      revision: row.revision,
-      ownerId: row.owner_id,
-      leaseUntil: row.lease_until,
-      updatedAt: row.updated_at
-    };
-  }
-  snapshot() {
-    return {
-      type: "snapshot",
-      bookings: this.bookings(),
-      drafts: this.drafts(),
-      users: this.users(),
-      presence: this.presence(),
-      serverTime: Date.now()
-    };
-  }
-  connect(request) {
-    checkOrigin(request);
-    const user = this.userById(new URL(request.url).searchParams.get("user"));
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
-      throw new AppError("საჭიროა WebSocket კავშირი.", "UPGRADE_REQUIRED", 426);
-    if (this.ctx.getWebSockets().length >= 32)
-      throw new AppError(
-        "ძალიან ბევრი მოწყობილობაა დაკავშირებული.",
-        "TOO_MANY_CONNECTIONS",
-        429
-      );
-    const pair = new WebSocketPair(),
-      client = pair[0],
-      server = pair[1];
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({
-      user,
-      connectionId: crypto.randomUUID(),
-      window: Date.now(),
-      count: 0
-    });
-    this.send(server, this.snapshot());
-    this.broadcastPresence();
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-      headers: { "Cache-Control": "no-store" }
-    });
-  }
-  send(ws, data) {
-    try {
-      ws.send(JSON.stringify(data));
-    } catch {
-      /* close callback releases editor lease */
-    }
-  }
-  broadcast(data) {
-    const packet = JSON.stringify(data);
-    for (const ws of this.ctx.getWebSockets()) {
-      try {
-        ws.send(packet);
-      } catch {}
-    }
-  }
-  presence() {
-    return [
-      ...new Set(
-        this.ctx
-          .getWebSockets()
-          .map((ws) => ws.deserializeAttachment()?.user?.id)
-          .filter(Boolean)
-      )
-    ];
-  }
-  broadcastPresence() {
-    this.broadcast({ type: "presence", users: this.presence() });
-  }
-  async webSocketMessage(ws, message) {
-    let requestId;
-    try {
-      if (message === "ping") {
-        ws.send("pong");
-        return;
-      }
-      if (
-        typeof message !== "string" ||
-        new TextEncoder().encode(message).length > 65536
-      ) {
-        this.send(ws, {
-          type: "error",
-          code: "TOO_LARGE",
-          message: "მოთხოვნა მეტისმეტად დიდია. ტექსტი შეამცირე."
-        });
-        ws.close(1009, "Message too large");
-        return;
-      }
-      const a = ws.deserializeAttachment();
-      if (!a) throw new AppError("კავშირის მონაცემები ვერ მოიძებნა.");
-      const now = Date.now();
-      if (now - a.window > 10000) {
-        a.window = now;
-        a.count = 0;
-      }
-      if (++a.count > 150)
-        throw new AppError(
-          "ცვლილებები ძალიან სწრაფად იგზავნება.",
-          "RATE_LIMIT",
-          429
-        );
-      ws.serializeAttachment(a);
-      let msg;
-      try {
-        msg = JSON.parse(message);
-      } catch {
-        throw new AppError("მოთხოვნა არასწორია.");
-      }
-      requestId =
-        typeof msg.requestId === "string"
-          ? msg.requestId.slice(0, 100)
-          : undefined;
-      switch (msg.type) {
-        case "sync":
-          this.send(ws, this.snapshot());
-          break;
-        case "edit.new":
-          this.beginNew(ws, a, msg);
-          break;
-        case "edit.begin":
-          this.beginEdit(ws, a, msg);
-          break;
-        case "edit.patch":
-          this.patchDraft(ws, a, msg);
-          break;
-        case "edit.save":
-          this.saveDraft(ws, a, msg);
-          break;
-        case "edit.discard":
-          this.discardDraft(ws, a, msg);
-          break;
-        case "edit.release":
-          this.releaseConnection(a.connectionId);
-          break;
-        case "edit.heartbeat": {
-          const draft = this.ownedDraft(a, msg.id);
-          this.sql.exec(
-            "UPDATE drafts SET lease_until=? WHERE id=?",
-            now + LEASE_MS,
-            draft.id
-          );
-          this.broadcast({
-            type: "lease",
-            id: draft.id,
-            leaseUntil: now + LEASE_MS
-          });
-          break;
-        }
-        case "booking.cancel":
-          this.cancelBooking(ws, a, msg);
-          break;
-        case "booking.restore":
-          this.restoreBooking(ws, a, msg);
-          break;
-        default:
-          throw new AppError("მოქმედება უცნობია.");
-      }
-      if (requestId) this.send(ws, { type: "ack", requestId });
-    } catch (error) {
-      if (!(error instanceof AppError))
-        console.error("Notebook realtime failed:", error?.stack || error);
-      this.send(ws, {
-        type: "error",
-        requestId,
-        code: error.code || "SERVER_ERROR",
-        message:
-          error instanceof AppError
-            ? error.message
-            : "ცვლილება ვერ შეინახა. შენს ტექსტს ეკრანზე ვინახავთ; სცადე ხელახლა."
-      });
-    }
-  }
-  validateId(id) {
-    if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id))
-      throw new AppError("ჩანაწერი ვერ მოიძებნა.", "NOT_FOUND", 404);
-  }
-  beginNew(ws, a, msg) {
-    if (!validDate(msg.date)) throw new AppError("აირჩიე სწორი თარიღი.");
-    this.releaseConnection(a.connectionId);
-    const existing = this.all(
-      "SELECT id, data FROM drafts WHERE base_version=0 AND owner_id=? ORDER BY updated_at DESC",
-      a.user.id
-    ).find((draft) => JSON.parse(draft.data).start_date === msg.date);
-    if (existing) {
-      this.beginEdit(ws, a, { id: existing.id });
-      return;
-    }
-    if (this.one("SELECT count(*) AS n FROM bookings").n >= MAX_BOOKINGS)
-      throw new AppError(
-        "ჩანაწერების ზღვარი მიღწეულია. საჭიროა არქივის გაფართოება."
-      );
-    const id = crypto.randomUUID(),
-      now = Date.now(),
-      data = newDraft(msg.date);
-    this.sql.exec(
-      "INSERT INTO drafts(id,data,base_version,revision,owner_id,connection_id,lease_until,updated_at) VALUES(?,?,0,1,?,?,?,?)",
-      id,
-      JSON.stringify(data),
-      a.user.id,
-      a.connectionId,
-      now + LEASE_MS,
-      now
-    );
-    const draft = this.draftView(
-      this.one("SELECT * FROM drafts WHERE id=?", id)
-    );
-    this.broadcast({ type: "draft", draft });
-    this.send(ws, { type: "editing", draft });
-  }
-  beginEdit(ws, a, msg) {
-    this.validateId(msg.id);
-    const now = Date.now(),
-      existing = this.one("SELECT * FROM drafts WHERE id=?", msg.id);
-    if (
-      existing &&
-      existing.connection_id !== a.connectionId &&
-      existing.lease_until > now
-    )
-      throw new AppError(
-        `${MEMBERS.find((m) => m.id === existing.owner_id)?.name || "სხვა წევრი"} ამ ჯავშანს ცვლის. მისი ტექსტი პირდაპირ ჩანს.`,
-        "LOCKED",
-        409
-      );
-    const booking = this.one(
-      "SELECT * FROM bookings WHERE id=? AND status != 'cancelled'",
-      msg.id
-    );
-    if (!existing && !booking)
-      throw new AppError("ჯავშანი ვერ მოიძებნა.", "NOT_FOUND", 404);
-    this.releaseConnection(a.connectionId, msg.id);
-    if (existing)
-      this.sql.exec(
-        "UPDATE drafts SET owner_id=?, connection_id=?, lease_until=? WHERE id=?",
-        a.user.id,
-        a.connectionId,
-        now + LEASE_MS,
-        msg.id
-      );
-    else
-      this.sql.exec(
-        "INSERT INTO drafts(id,data,base_version,revision,owner_id,connection_id,lease_until,updated_at) VALUES(?,?,?,1,?,?,?,?)",
-        msg.id,
-        booking.data,
-        booking.version,
-        a.user.id,
-        a.connectionId,
-        now + LEASE_MS,
-        now
-      );
-    const draft = this.draftView(
-      this.one("SELECT * FROM drafts WHERE id=?", msg.id)
-    );
-    this.broadcast({ type: "draft", draft });
-    this.send(ws, { type: "editing", draft });
-  }
-  ownedDraft(a, id) {
-    this.validateId(id);
-    const row = this.one("SELECT * FROM drafts WHERE id=?", id);
-    if (
-      !row ||
-      row.connection_id !== a.connectionId ||
-      row.owner_id !== a.user.id ||
-      row.lease_until < Date.now()
-    )
-      throw new AppError(
-        "რედაქტირების უფლება დასრულდა. ხელახლა გახსენი ჩანაწერი.",
-        "LOCK_LOST",
-        409
-      );
-    return row;
-  }
-  patchDraft(ws, a, msg) {
-    const row = this.ownedDraft(a, msg.id),
-      patch = checkedPatch(msg.patch),
-      data = { ...JSON.parse(row.data), ...patch },
-      now = Date.now();
-    this.sql.exec(
-      "UPDATE drafts SET data=?, revision=revision+1, updated_at=?, lease_until=? WHERE id=?",
-      JSON.stringify(data),
-      now,
-      now + LEASE_MS,
-      row.id
-    );
-    this.broadcast({
-      type: "draft",
-      draft: this.draftView(this.one("SELECT * FROM drafts WHERE id=?", row.id))
-    });
-  }
-  checkOverlap(id, start, end) {
-    const conflict = this.one(
-      "SELECT data FROM bookings WHERE id != ? AND status != 'cancelled' AND starts_at < ? AND ends_at > ? LIMIT 1",
-      id,
-      end,
-      start
-    );
-    if (conflict) {
-      const d = JSON.parse(conflict.data);
-      throw new AppError(
-        `ეს მონაკვეთი დაკავებულია: ${d.start_date} ${d.start_time} — ${d.end_date} ${d.end_time}. შეცვალე თარიღი ან საათი.`,
-        "OVERLAP",
-        409
-      );
-    }
-  }
-  saveDraft(ws, a, msg) {
-    const draft = this.ownedDraft(a, msg.id),
-      validated = validateBooking(JSON.parse(draft.data)),
-      now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      const before = this.one("SELECT * FROM bookings WHERE id=?", draft.id);
-      if (
-        (before?.version || 0) !== draft.base_version ||
-        before?.status === "cancelled"
-      )
-        throw new AppError(
-          "ჯავშანი უკვე შეიცვალა. განაახლე ჩანაწერი.",
-          "CONFLICT",
-          409
-        );
-      this.checkOverlap(draft.id, validated.start, validated.end);
-      const packed = JSON.stringify(validated.data);
-      this.sql.exec(
-        "INSERT INTO bookings(id,data,status,starts_at,ends_at,version,updated_at,updated_by,created_at,created_by) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,status=excluded.status,starts_at=excluded.starts_at,ends_at=excluded.ends_at,version=excluded.version,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
-        draft.id,
-        packed,
-        validated.data.status,
-        validated.start,
-        validated.end,
-        draft.base_version + 1,
-        now,
-        a.user.id,
-        before?.created_at || now,
-        before?.created_by || a.user.id
-      );
-      this.sql.exec(
-        "INSERT INTO history(booking_id,action,user_id,at,before_data,after_data) VALUES(?,?,?,?,?,?)",
-        draft.id,
-        before ? "updated" : "created",
-        a.user.id,
-        now,
-        before?.data || null,
-        packed
-      );
-      this.sql.exec("DELETE FROM drafts WHERE id=?", draft.id);
-    });
-    this.broadcast({
-      type: "saved",
-      booking: this.bookingView(
-        this.one("SELECT * FROM bookings WHERE id=?", draft.id)
-      ),
-      by: a.user.id
-    });
-  }
-  discardDraft(ws, a, msg) {
-    const draft = this.ownedDraft(a, msg.id);
-    this.sql.exec("DELETE FROM drafts WHERE id=?", draft.id);
-    this.broadcast({ type: "discarded", id: draft.id });
-  }
-  cancelBooking(ws, a, msg) {
-    const draft = this.ownedDraft(a, msg.id),
-      now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      const before = this.one(
-        "SELECT * FROM bookings WHERE id=? AND status != 'cancelled'",
-        draft.id
-      );
-      if (!before || before.version !== draft.base_version)
-        throw new AppError("ჯავშანი უკვე შეიცვალა.", "CONFLICT", 409);
-      const after = { ...JSON.parse(before.data), status: "cancelled" };
-      this.sql.exec(
-        "UPDATE bookings SET data=?,status='cancelled',version=version+1,updated_at=?,updated_by=? WHERE id=?",
-        JSON.stringify(after),
-        now,
-        a.user.id,
-        draft.id
-      );
-      this.sql.exec(
-        "INSERT INTO history(booking_id,action,user_id,at,before_data,after_data) VALUES(?,?,?,?,?,?)",
-        draft.id,
-        "cancelled",
-        a.user.id,
-        now,
-        before.data,
-        JSON.stringify(after)
-      );
-      this.sql.exec("DELETE FROM drafts WHERE id=?", draft.id);
-    });
-    this.broadcast({ type: "cancelled", id: draft.id });
-  }
-  restoreBooking(ws, a, msg) {
-    this.validateId(msg.id);
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      const before = this.one(
-        "SELECT * FROM bookings WHERE id=? AND status='cancelled'",
-        msg.id
-      );
-      if (!before)
-        throw new AppError(
-          "ჯავშანი უკვე აღდგენილია ან ვერ მოიძებნა.",
-          "CONFLICT",
-          409
-        );
-      const old = this.one(
-        "SELECT before_data FROM history WHERE booking_id=? AND action='cancelled' ORDER BY id DESC LIMIT 1",
-        msg.id
-      );
-      if (!old) throw new AppError("აღდგენის ჩანაწერი ვერ მოიძებნა.");
-      const validated = validateBooking(JSON.parse(old.before_data));
-      this.checkOverlap(msg.id, validated.start, validated.end);
-      const packed = JSON.stringify(validated.data);
-      this.sql.exec(
-        "UPDATE bookings SET data=?,status=?,version=version+1,updated_at=?,updated_by=? WHERE id=?",
-        packed,
-        validated.data.status,
-        now,
-        a.user.id,
-        msg.id
-      );
-      this.sql.exec(
-        "INSERT INTO history(booking_id,action,user_id,at,before_data,after_data) VALUES(?,?,?,?,?,?)",
-        msg.id,
-        "restored",
-        a.user.id,
-        now,
-        before.data,
-        packed
-      );
-    });
-    this.broadcast({
-      type: "saved",
-      booking: this.bookingView(
-        this.one("SELECT * FROM bookings WHERE id=?", msg.id)
-      ),
-      by: a.user.id
-    });
-  }
-  releaseConnection(connectionId, exceptId = "") {
-    const rows = this.all(
-      "SELECT id FROM drafts WHERE connection_id=? AND id != ?",
-      connectionId,
-      exceptId
-    );
-    for (const row of rows) {
-      this.sql.exec(
-        "UPDATE drafts SET connection_id=NULL,lease_until=0 WHERE id=?",
-        row.id
-      );
-      this.broadcast({
-        type: "draft",
-        draft: this.draftView(
-          this.one("SELECT * FROM drafts WHERE id=?", row.id)
-        )
-      });
-    }
-  }
-  webSocketClose(ws) {
-    const a = ws.deserializeAttachment();
-    if (a) this.releaseConnection(a.connectionId);
-    try {
-      ws.close();
-    } catch {}
-    this.broadcastPresence();
-  }
-  webSocketError(ws) {
-    this.webSocketClose(ws);
-  }
-}
